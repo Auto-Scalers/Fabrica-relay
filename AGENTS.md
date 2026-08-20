@@ -10,34 +10,37 @@ This is the **Fabrica relay server** — a standalone WebSocket bridge that enab
 - Two components: **Director** (HTTP API) and **Cell** (WebSocket server)
 - The relay bridges the mobile app to the desktop app when direct LAN connection isn't available
 - Security-critical: E2EE challenge-response authentication, device credential lifecycle
-- Deployed to Fly.io via Dockerfile
+- Deployed to Cloudflare Workers + Durable Objects via `wrangler deploy`
 
 ## Tech Stack
 
-- Node.js 20+
+- Cloudflare Workers runtime (V8 isolates, not Node)
 - TypeScript
-- Fastify (HTTP API)
-- `ws` (WebSocket server)
-- `@noble/ciphers` (NaCl box for E2EE)
-- SQLite (leases, state) or Postgres for production
+- Hono (HTTP API, upgradeWebSocket)
+- Durable Objects + WebSocket Hibernation API
+- tweetnacl (NaCl box, pure-JS)
+- HMAC-SHA256 via Web Crypto (`crypto.subtle`) — Workers has no `node:crypto`
+- D1/SQLite per object (prod); local SQLite (dev)
 - Vitest (testing)
 
 ## Architecture
 
 ```
-Director (HTTP)                    Cell (WebSocket)
-├── POST /v1/token-exchange        ├── /v1/host/control   (desktop app)
-└── POST /v1/assign                └── /v1/phone/*        (mobile app)
+Director (HTTP Worker)              Cell (Durable Object)
+├── POST /v1/assign                 ├── /v1/host/control   (desktop app, control channel — stays awake)
+├── POST /v1/resolve                ├── /v1/host/data/<connId>  (per-connection data, may hibernate)
+└── WS /v1/connect/<relayHostId>    └── /v1/connect/<relayHostId>  (phone invite recovery)
 ```
 
 ### Director
-- `POST /v1/token-exchange` — validates Fabrica access token, returns relay JWT
-- `POST /v1/assign` — assigns host to a cell, returns cell URL + epoch + lease
+- `POST /v1/assign` — host requests cell assignment → `{ cellUrl, assignmentEpoch, lease }`. Requires `Authorization: Bearer <relayToken>` (relay JWT minted by auth backend, not the relay).
+- `POST /v1/resolve` — phone resume recovery; phone authenticates via `resumeToken` in the POST body `{ v:1, relayHostId, resumeToken }` → `{ v:1, cellUrl, assignmentEpoch, leaseExpiresAt }`. No Bearer JWT on this route.
 
 ### Cell
-- Host control channel (`/v1/host/control`) — challenge-response auth, ping/pong, conn-open, drain
-- Phone channel (`/v1/phone/*`) — relay-hello, relay-moved, data tunneling
-- Per-connection data channels for E2EE tunneling
+- Director WS `/v1/connect/<relayHostId>` — phone invites the Director for resume recovery; server replies `relay-moved { v:1, cellUrl, assignmentEpoch }` (strictly-newer epoch, 5s client timeout), NOT `relay-hello`.
+- Cell WS `/v1/connect/<relayHostId>` — first phone message `relay-auth`; server sends `relay-hello` only after host data socket attaches.
+- Host control channel (`/v1/host/control`) — challenge-response auth (tweetnacl NaCl box + HMAC via Web Crypto), server-driven pings (JSON `{type:'ping', t}` with `t` = epoch ms every 15s), conn-open, drain. Control socket stays awake (no hibernation). Client replies `{type:'pong', t}`; a bare `{type:'ping'}` fails the client schema → close 4401.
+- Per-connection data channels (`/v1/host/data/<connId>`) — raw frame forwarding, binary/text preserved. May hibernate when idle.
 
 ## Conventions
 
@@ -46,8 +49,8 @@ Director (HTTP)                    Cell (WebSocket)
 - **All IDs are opaque strings**, 1-128 chars
 - **All base64url tokens are 32 bytes** (43 chars)
 - **All timestamps are epoch milliseconds**
-- **All WebSocket messages are JSON** (no binary on control channel)
-- **Max payload: 64KB** per WebSocket message
+- **All WebSocket messages are JSON** (no binary on control channel); data channels forward raw frames (binary or text)
+- **Max payload: 64KB** per WebSocket message (control channel); data channel cap = 1 MiB (Workers max)
 
 ## What You Do NOT Do
 
@@ -58,13 +61,40 @@ Director (HTTP)                    Cell (WebSocket)
 ## Key Files
 
 ```
-src/director/          — HTTP API (token-exchange, assign)
-src/cell/              — WebSocket server (host + phone)
-src/shared/            — Types, crypto, protocol
-Dockerfile             — Fly.io deployment
+src/director/          — HTTP API (assign, resolve)
+src/cell/              — Durable Object (WebSocket server, host + phone)
+src/shared/            — Types, crypto (tweetnacl + Web Crypto), protocol
+src/index.ts           — Worker entry
+wrangler.toml          — Cloudflare config
 package.json           — Dependencies
 .Fabrica-relay-board/  — Task file and planning docs
 ```
+
+## Wire Compatibility
+
+The server MUST be wire-compatible with the existing client code. Source of truth:
+`Fabrica-app/src/main/runtime/relay/relay-control-protocol.ts` (all message schemas).
+
+Key constraints:
+- Server sends app-level JSON `{type:'ping', t}` (`t` = epoch ms) every 15s; client replies `{type:'pong', t}` and dies after 75s silence. A bare `{type:'ping'}` fails the client schema → close 4401.
+- Control socket stays awake (no hibernation); data sockets may hibernate
+- NaCl box via tweetnacl (NOT @noble/ciphers). HMAC-SHA256 either way: the CLIENT uses `node:crypto` (`createHmac` + `timingSafeEqual`); the SERVER must swap to Web Crypto `crypto.subtle` because Workers has no `node:crypto`.
+- Relay JWT validated ONLY on /v1/assign (HS256, FABRICA_RELAY_JWT_SECRET); /v1/resolve authenticates via `resumeToken` in the POST body
+- One host = one Durable Object instance (all sockets pinned to one DO)
+- Device management (invite-create, revoke, etc.) rides the **control channel** as reqId RPCs. The control channel is plaintext JSON authenticated via challenge-response (host-proof) — NOT E2EE-encrypted. E2EE v2 framing exists ONLY on data channels.
+
+### Client-required behaviors (confirmed from client code)
+
+- Close codes: 4401 BAD_OUTER_CREDENTIAL, 4404 HOST_OFFLINE, 4408 PEER_DROPPED, 4409 WRONG_CELL, 4429 LIMIT_EXCEEDED, 4503 DRAINING
+- `drain` fields: `{ type:'drain', graceMs (≤3,600,000), recovery:'resolve-director' }` — `recovery` is a required literal
+- `conn-open` fields: `{ type:'conn-open', connId, connTicket, kind:'invite'|'resume', relayDeviceId, attachDeadlineMs (≤60,000) }`; host must attach the data socket within the deadline
+- `host-hello-ack` requires `v:1`, `generation (>0)`, `controlResumeSecret`, `leaseExpiresAt`, `activeConnIds` (≤8), `pendingConns` (≤8)
+- Client sends `{ type:'auth-refresh', relayJwt }` over control on token refresh
+- Server replies to failed reqId RPCs with `{ type:'control-error', reqId?, code }`
+- `relay-hello` can be `{ type:'relay-hello', ok:false, code }` (code 4000–4999) on rejection
+- `host-data-auth` shape: `{ type:'host-data-auth', v:1, connTicket, generation }`
+- Client proactively rebinds control ~60s + jitter (0–60s) before `leaseExpiresAt`; rebind requires the same cellUrl + controlResumeSecret + generation > 0
+- On the Director WS `/v1/connect/<relayHostId>`, reply `relay-moved { v:1, cellUrl, assignmentEpoch }` (strictly-newer epoch, 5s client timeout)
 
 ## Task File
 
@@ -82,3 +112,13 @@ If blocked:
 ```bash
 orca orchestration send --type escalation --subject "Blocked" --body "What happened and what's needed" --task-id <task_id> --dispatch-id <dispatch_id> --json
 ```
+
+## Orchestration IDs
+
+Your task file's Session Ledger tracks these IDs for every worker session:
+
+| ID | Format | When You Get It | How to Use It |
+|----|--------|-----------------|---------------|
+| `task_xxx` | `task_` + hex | `task-create --json` → `result.task.id` | Resume a stuck worker: `worker-start --task <task_id> --retry-of <dispatch_id>` |
+| `ctx_xxx` | `ctx_` + hex | `worker-start --json` → `result.dispatchId` | Read worker output: `worker-read --dispatch <ctx_xxx>`. Resume: `--retry-of <ctx_xxx>` |
+| `term_xxx` | `term_` + uuid | `worker-start --json` → `effects[terminal].id` | Send message to worker: `terminal send --terminal <term_xxx>`. Read output: `terminal read --terminal <term_xxx>` |
