@@ -234,6 +234,7 @@ Key constraints discovered (drive the architecture):
 
 | Session Handle | Type | Task/Group | Status | Created | Worktree Branch | Merged |
 |---------------|------|-----------|--------|---------|----------------|--------|
+| `term_59b66903-3a00-404d-a628-c7d81cdd843a` | worker | R16+R22 miniflare integration tests — run `run_effeaea830f9`, task `task_9a1942ab8f58`, dispatch `ctx_d33866e33259` | **active** | Aug 21 2026 | `main` (Fabrica-relay/) | — |
 
 **Rules:**
 - Only the main orchestrator creates sessions in this ledger

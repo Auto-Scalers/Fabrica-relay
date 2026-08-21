@@ -119,6 +119,19 @@ interface DataConn {
 // tags used to resolve a ws back to its host during the WS lifecycle
 const TYPE_TAGS = new Set(["control", "phone", "data"]);
 
+// ctx.getTags() only works on hibernatable sockets; these sockets are
+// accept()ed manually, so track tags in-memory instead
+const wsTags = new WeakMap<WebSocket, string[]>();
+
+function getWsTags(ws: WebSocket): string[] {
+  let tags = wsTags.get(ws);
+  if (!tags) {
+    tags = [];
+    wsTags.set(ws, tags);
+  }
+  return tags;
+}
+
 // ------------------------------------------------------------ transcript builder
 
 // The transcript is a binary-encoded struct with these fields (length-prefixed UTF-8 strings, 8-byte big-endian numbers):
@@ -251,7 +264,7 @@ export class Cell extends DurableObject<CellEnv> {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair) as unknown as [WebSocket, WebSocket];
       server.accept();
-      const tags = this.ctx.getTags(server);
+      const tags = getWsTags(server);
       const path = url.pathname;
       if (path === "/v1/host/control") {
         tags.push("control");
@@ -287,7 +300,7 @@ export class Cell extends DurableObject<CellEnv> {
   // ------------------------------------------------------------- host resolution
 
   private resolveHostId(ws: WebSocket): string | undefined {
-    const tags = this.ctx.getTags(ws);
+    const tags = wsTags.get(ws) ?? [];
     for (const t of tags) {
       if (!TYPE_TAGS.has(t)) return t;
     }
@@ -297,7 +310,7 @@ export class Cell extends DurableObject<CellEnv> {
   // ------------------------------------------------------------- WebSocket lifecycle
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void | Promise<void> {
-    const tags = this.ctx.getTags(ws);
+    const tags = wsTags.get(ws) ?? [];
     if (tags.includes("control")) {
       this.handleControlMessage(ws, message);
     } else if (tags.includes("phone")) {
@@ -313,7 +326,7 @@ export class Cell extends DurableObject<CellEnv> {
     _reason: string,
     _wasClean: boolean,
   ): void | Promise<void> {
-    const tags = this.ctx.getTags(ws);
+    const tags = wsTags.get(ws) ?? [];
     if (tags.includes("control")) {
       this.handleControlClose(ws);
     } else if (tags.includes("phone")) {
@@ -321,10 +334,11 @@ export class Cell extends DurableObject<CellEnv> {
     } else if (tags.includes("data")) {
       this.handleDataClose(ws);
     }
+    wsTags.delete(ws);
   }
 
   webSocketError(ws: WebSocket, _error: unknown): void | Promise<void> {
-    const tags = this.ctx.getTags(ws);
+    const tags = wsTags.get(ws) ?? [];
     if (tags.includes("control")) {
       this.handleControlClose(ws);
     } else if (tags.includes("phone")) {
@@ -524,7 +538,7 @@ export class Cell extends DurableObject<CellEnv> {
     });
 
     // Tag this ws so lifecycle handlers can resolve the host.
-    this.ctx.getTags(ws).push(relayHostId);
+    getWsTags(ws).push(relayHostId);
   }
 
   private async handleHostChallengeAck(
@@ -1026,7 +1040,7 @@ export class Cell extends DurableObject<CellEnv> {
       dataConn.relayHostId = relayHostId;
 
       // Tag this ws with the host id now that it is resolved.
-      this.ctx.getTags(ws).push(relayHostId);
+      getWsTags(ws).push(relayHostId);
 
       return;
     }
