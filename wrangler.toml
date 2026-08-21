@@ -1,0 +1,19 @@
+name = "fabrica-relay"
+main = "src/index.ts"
+account_id = "29426cba5c56f3a08df28fb89e48bb23"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "CELL", class_name = "Cell" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Cell"]
+
+[vars]
+# Set via `wrangler secret put FABRICA_RELAY_JWT_SECRET`
+# DIRECTOR_URL is the production URL (free workers.dev subdomain)
+DIRECTOR_URL = "https://fabrica-relay.fabrica-relay.workers.dev"
