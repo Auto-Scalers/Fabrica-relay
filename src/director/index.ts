@@ -19,6 +19,10 @@ export interface DirectorEnv {
 const logger = createLogger("director");
 const assignRateLimiter = new RateLimiter({ maxHits: 10, windowMs: 60_000 });
 
+// Must match the hub DO name used by the WS router in src/index.ts — all
+// sockets for every host live in this single multi-tenant Durable Object
+const HUB_ID = "relay-hub";
+
 // --------------- helpers
 
 function base64UrlDecode(s: string): Uint8Array {
@@ -128,7 +132,9 @@ export function createDirectorApp(): Hono<{ Bindings: DirectorEnv }> {
       return c.json({ error: "invalid request fields" }, 400);
     }
 
-    const id = c.env.CELL.idFromName(body.relayHostId);
+    // Resolve against the hub DO — the same instance that holds the host's
+    // live WS state (see HUB_ID note above)
+    const id = c.env.CELL.idFromName(HUB_ID);
     const stub = c.env.CELL.get(id);
 
     // Ask the DO to validate the resume token and get assignment info

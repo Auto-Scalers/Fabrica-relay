@@ -7,3 +7,5 @@ dist/
 *.local
 .DS_Store
 *.log
+
+src/__tests__/.integration-build/

@@ -104,32 +104,32 @@ interface PendingChallenge {
 }
 
 interface PhoneConn {
-  ws: WebSocket;
-  relayDeviceId?: string;
+  relayDeviceId: string;
   relayHostId: string;
 }
 
 interface DataConn {
-  ws: WebSocket;
   connId: string;
-  phoneWs?: WebSocket;
+  authed: boolean;
+  phoneDeviceId?: string;
   relayHostId: string;
 }
 
-// tags used to resolve a ws back to its host during the WS lifecycle
-const TYPE_TAGS = new Set(["control", "phone", "data"]);
+// Sockets are registered via the hibernation API (ctx.acceptWebSocket) so
+// close/error events are always delivered and idle data sockets may
+// hibernate. Socket stubs are rehydrated per event, so routing uses tags
+// (set at accept time) and per-socket attachments — never object identity.
+const TYPE_TAGS = new Set(["control", "phone"]);
 
-// ctx.getTags() only works on hibernatable sockets; these sockets are
-// accept()ed manually, so track tags in-memory instead
-const wsTags = new WeakMap<WebSocket, string[]>();
+function tagForConn(connId: string): string {
+  return `conn:${connId}`;
+}
 
-function getWsTags(ws: WebSocket): string[] {
-  let tags = wsTags.get(ws);
-  if (!tags) {
-    tags = [];
-    wsTags.set(ws, tags);
+function connIdFromTags(tags: string[]): string | undefined {
+  for (const t of tags) {
+    if (t.startsWith("conn:")) return t.slice("conn:".length);
   }
-  return tags;
+  return undefined;
 }
 
 // ------------------------------------------------------------ transcript builder
@@ -263,24 +263,75 @@ export class Cell extends DurableObject<CellEnv> {
     if (upgrade && upgrade.toLowerCase() === "websocket") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair) as unknown as [WebSocket, WebSocket];
-      server.accept();
-      const tags = getWsTags(server);
       const path = url.pathname;
+      // Hibernation API: events route to the class-level webSocketMessage/
+      // webSocketClose handlers; tags identify the socket across events.
+      // Control sockets stay awake via the 15s ping timer; data sockets may
+      // hibernate when idle. The peer's close handshake is completed in
+      // webSocketClose via an explicit ws.close().
       if (path === "/v1/host/control") {
-        tags.push("control");
+        this.ctx.acceptWebSocket(server, ["control"]);
       } else if (path.startsWith("/v1/host/data/")) {
-        tags.push("data");
         const connId = path.slice("/v1/host/data/".length);
-        this.registerDataConn(connId, server);
+        this.registerDataConn(connId);
+        this.ctx.acceptWebSocket(server, ["data", tagForConn(connId)]);
       } else if (path.startsWith("/v1/connect/")) {
-        tags.push("phone");
         const relayHostId = decodeURIComponent(path.slice("/v1/connect/".length));
-        if (relayHostId) tags.push(relayHostId);
+        this.ctx.acceptWebSocket(server, ["phone", `host:${relayHostId}`]);
+      } else {
+        return new Response("Not Found", { status: 404 });
       }
       return new Response(null, { status: 101, webSocket: client });
     }
 
     return new Response("Not Found", { status: 404 });
+  }
+
+  // ------------------------------------------------------------- WebSocket lifecycle
+
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void | Promise<void> {
+    const tags = this.ctx.getTags(ws);
+    if (tags.includes("control")) {
+      this.handleControlMessage(ws, message);
+    } else if (tags.includes("phone")) {
+      this.handlePhoneMessage(ws, message);
+    } else if (tags.includes("data")) {
+      this.handleDataMessage(ws, message);
+    }
+  }
+
+  webSocketClose(
+    ws: WebSocket,
+    _code: number,
+    _reason: string,
+    _wasClean: boolean,
+  ): void | Promise<void> {
+    const tags = this.ctx.getTags(ws);
+    if (tags.includes("control")) {
+      this.handleControlClose(ws);
+    } else if (tags.includes("phone")) {
+      this.handlePhoneClose(ws);
+    } else if (tags.includes("data")) {
+      this.handleDataClose(ws);
+    }
+    // Complete the closing handshake — without an explicit ws.close() the
+    // peer's close event stalls until the runtime gives up
+    try {
+      ws.close(1000, "");
+    } catch {
+      /* already closed */
+    }
+  }
+
+  webSocketError(ws: WebSocket, _error: unknown): void | Promise<void> {
+    const tags = this.ctx.getTags(ws);
+    if (tags.includes("control")) {
+      this.handleControlClose(ws);
+    } else if (tags.includes("phone")) {
+      this.handlePhoneClose(ws);
+    } else if (tags.includes("data")) {
+      this.handleDataClose(ws);
+    }
   }
 
   private async handleResolveResume(request: Request): Promise<Response> {
@@ -300,53 +351,22 @@ export class Cell extends DurableObject<CellEnv> {
   // ------------------------------------------------------------- host resolution
 
   private resolveHostId(ws: WebSocket): string | undefined {
-    const tags = wsTags.get(ws) ?? [];
+    // Control sockets learn their host id at host-hello (stored as a
+    // per-socket attachment); phone/data sockets carry it in their tags
+    try {
+      const att = ws.deserializeAttachment() as { relayHostId?: string } | undefined;
+      if (att?.relayHostId) return att.relayHostId;
+    } catch {
+      /* no attachment set yet */
+    }
+    const tags = this.ctx.getTags(ws);
     for (const t of tags) {
-      if (!TYPE_TAGS.has(t)) return t;
+      if (t.startsWith("host:")) return t.slice("host:".length);
     }
     return undefined;
   }
 
   // ------------------------------------------------------------- WebSocket lifecycle
-
-  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void | Promise<void> {
-    const tags = wsTags.get(ws) ?? [];
-    if (tags.includes("control")) {
-      this.handleControlMessage(ws, message);
-    } else if (tags.includes("phone")) {
-      this.handlePhoneMessage(ws, message);
-    } else if (tags.includes("data")) {
-      this.handleDataMessage(ws, message);
-    }
-  }
-
-  webSocketClose(
-    ws: WebSocket,
-    _code: number,
-    _reason: string,
-    _wasClean: boolean,
-  ): void | Promise<void> {
-    const tags = wsTags.get(ws) ?? [];
-    if (tags.includes("control")) {
-      this.handleControlClose(ws);
-    } else if (tags.includes("phone")) {
-      this.handlePhoneClose(ws);
-    } else if (tags.includes("data")) {
-      this.handleDataClose(ws);
-    }
-    wsTags.delete(ws);
-  }
-
-  webSocketError(ws: WebSocket, _error: unknown): void | Promise<void> {
-    const tags = wsTags.get(ws) ?? [];
-    if (tags.includes("control")) {
-      this.handleControlClose(ws);
-    } else if (tags.includes("phone")) {
-      this.handlePhoneClose(ws);
-    } else if (tags.includes("data")) {
-      this.handleDataClose(ws);
-    }
-  }
 
   // ------------------------------------------------------------- Host control channel
 
@@ -523,7 +543,7 @@ export class Cell extends DurableObject<CellEnv> {
       generation: finalGen,
       controlResumeSecret: existing?.stored.controlResumeSecret ?? generateBase64Url32(),
       leaseExpiresAt: Date.now() + 3600000,
-      appVersion: msg.appVersion,
+      appVersion: msg.appVersion ?? "",
     };
     this.store.putHostState(relayHostId, stored);
 
@@ -537,8 +557,8 @@ export class Cell extends DurableObject<CellEnv> {
       activeConnIds: existing?.activeConnIds ?? [],
     });
 
-    // Tag this ws so lifecycle handlers can resolve the host.
-    getWsTags(ws).push(relayHostId);
+    // Remember the host id on this socket so lifecycle handlers can resolve it.
+    ws.serializeAttachment({ relayHostId });
   }
 
   private async handleHostChallengeAck(
@@ -668,20 +688,27 @@ export class Cell extends DurableObject<CellEnv> {
       this.sendControlError(ws, reqId, "not-authenticated");
       return;
     }
-    const credentialPubKey = msg.credentialPubKey as string;
-    if (!credentialPubKey) {
-      this.sendControlError(ws, reqId, "missing-credential-pub-key");
+    // Client wire shape: { type:'device-credential-install', v:1, reqId,
+    // relayDeviceId, newResumeTokenHash, authorization } (see
+    // Fabrica-app relay-control-requests.ts installCredential)
+    const relayDeviceId = msg.relayDeviceId as string | undefined;
+    if (!relayDeviceId) {
+      this.sendControlError(ws, reqId, "missing-relay-device-id");
       return;
     }
-    const deviceId = generateId();
-    runtime.deviceCredentials.set(deviceId, {
-      pubKey: credentialPubKey,
+    const newResumeTokenHash = msg.newResumeTokenHash as string | undefined;
+    if (!newResumeTokenHash) {
+      this.sendControlError(ws, reqId, "missing-new-resume-token-hash");
+      return;
+    }
+    runtime.deviceCredentials.set(relayDeviceId, {
+      pubKey: newResumeTokenHash,
       createdAt: Date.now(),
       version: 1,
     });
     this.store.putCredential(relayHostId, {
-      deviceId,
-      pubKey: credentialPubKey,
+      deviceId: relayDeviceId,
+      pubKey: newResumeTokenHash,
       createdAt: Date.now(),
       version: 1,
     });
@@ -701,7 +728,7 @@ export class Cell extends DurableObject<CellEnv> {
     msg: Record<string, unknown>,
   ): void {
     const reqId = msg.reqId as string | undefined;
-    const deviceId = msg.deviceId as string;
+    const deviceId = (msg.relayDeviceId ?? msg.basisConnId) as string;
     if (!deviceId) {
       this.sendControlError(ws, reqId, "missing-device-id");
       return;
@@ -738,7 +765,7 @@ export class Cell extends DurableObject<CellEnv> {
     msg: Record<string, unknown>,
   ): void {
     const reqId = msg.reqId as string | undefined;
-    const deviceId = msg.deviceId as string;
+    const deviceId = (msg.relayDeviceId ?? msg.basisConnId) as string;
     if (!deviceId) {
       this.sendControlError(ws, reqId, "missing-device-id");
       return;
@@ -760,7 +787,7 @@ export class Cell extends DurableObject<CellEnv> {
     msg: Record<string, unknown>,
   ): void {
     const reqId = msg.reqId as string | undefined;
-    const deviceId = msg.deviceId as string;
+    const deviceId = (msg.relayDeviceId ?? msg.basisConnId) as string;
     if (!deviceId) {
       this.sendControlError(ws, reqId, "missing-device-id");
       return;
@@ -853,7 +880,8 @@ export class Cell extends DurableObject<CellEnv> {
     }
 
     // First message must be relay-auth
-    if (!this.findPhoneConnByWs(ws)) {
+    const phoneConn = this.phoneConnForSocket(ws);
+    if (!phoneConn) {
       if (msg.type !== "relay-auth") {
         ws.close(CloseCode.BAD_OUTER_CREDENTIAL, "expected relay-auth");
         return;
@@ -866,22 +894,45 @@ export class Cell extends DurableObject<CellEnv> {
     this.forwardPhoneToHost(ws, raw);
   }
 
-  private findPhoneConnByWs(ws: WebSocket): PhoneConn | undefined {
-    for (const conn of this.phoneConns.values()) {
-      if (conn.ws === ws) return conn;
+  private phoneConnForSocket(ws: WebSocket): PhoneConn | undefined {
+    try {
+      const att = ws.deserializeAttachment() as { relayDeviceId?: string } | undefined;
+      if (att?.relayDeviceId) return this.phoneConns.get(att.relayDeviceId);
+    } catch {
+      /* no attachment yet */
+    }
+    return undefined;
+  }
+
+  // Live server-side stub for a registered phone socket (fresh lookups are
+  // required because hibernated sockets are rehydrated per event)
+  private findPhoneSocket(deviceId: string | undefined): WebSocket | undefined {
+    for (const ws of this.ctx.getWebSockets("phone")) {
+      try {
+        const att = ws.deserializeAttachment() as { relayDeviceId?: string } | undefined;
+        if (!deviceId) return ws;
+        if (att?.relayDeviceId === deviceId) return ws;
+      } catch {
+        continue;
+      }
     }
     return undefined;
   }
 
   private forwardPhoneToHost(phoneWs: WebSocket, data: string | ArrayBuffer): void {
-    const phoneConn = this.findPhoneConnByWs(phoneWs);
-    const hostId = phoneConn?.relayHostId;
+    const phoneConn = this.phoneConnForSocket(phoneWs);
+    if (!phoneConn) return;
+    // Find the authed data channel belonging to this phone's connection
     for (const dataConn of this.dataConns.values()) {
-      if (dataConn.phoneWs === phoneWs && (!hostId || dataConn.relayHostId === hostId)) {
-        try {
-          dataConn.ws.send(data);
-        } catch {
-          phoneWs.close(CloseCode.PEER_DROPPED, "host disconnected");
+      if (dataConn.authed && dataConn.relayHostId === phoneConn.relayHostId
+          && dataConn.phoneDeviceId === phoneConn.relayDeviceId) {
+        const target = this.ctx.getWebSockets(tagForConn(dataConn.connId))[0];
+        if (target) {
+          try {
+            target.send(data);
+          } catch {
+            phoneWs.close(CloseCode.PEER_DROPPED, "host disconnected");
+          }
         }
         return;
       }
@@ -908,7 +959,9 @@ export class Cell extends DurableObject<CellEnv> {
     const relayDeviceId = credential;
 
     // Store phone connection (per host)
-    this.phoneConns.set(relayDeviceId, { ws, relayDeviceId, relayHostId });
+    this.phoneConns.set(relayDeviceId, { relayDeviceId, relayHostId });
+    // Remember this socket's device/host so later events can resolve it
+    ws.serializeAttachment({ relayDeviceId, relayHostId });
 
     // Check connection limits before notifying host
     const pendingCount = runtime?.pendingConns.length ?? 0;
@@ -955,25 +1008,27 @@ export class Cell extends DurableObject<CellEnv> {
   }
 
   private handlePhoneClose(ws: WebSocket): void {
-    for (const [id, conn] of this.phoneConns) {
-      if (conn.ws === ws) {
-        this.phoneConns.delete(id);
-        break;
-      }
+    const phoneConn = this.phoneConnForSocket(ws);
+    if (phoneConn) {
+      this.phoneConns.delete(phoneConn.relayDeviceId);
     }
   }
 
   // ------------------------------------------------------------- Data channel
 
+  private connIdForSocket(ws: WebSocket): string | undefined {
+    return connIdFromTags(this.ctx.getTags(ws));
+  }
+
   private handleDataMessage(ws: WebSocket, raw: string | ArrayBuffer): void {
-    // First message must be host-data-auth (JSON)
-    const dataConn = this.findDataConn(ws);
+    const connId = this.connIdForSocket(ws);
+    const dataConn = connId ? this.dataConns.get(connId) : undefined;
     if (!dataConn) {
       ws.close(CloseCode.BAD_OUTER_CREDENTIAL, "unknown data connection");
       return;
     }
 
-    if (!dataConn.phoneWs) {
+    if (!dataConn.authed) {
       // Expect host-data-auth
       if (typeof raw !== "string") {
         ws.close(CloseCode.BAD_OUTER_CREDENTIAL, "expected host-data-auth JSON");
@@ -1030,58 +1085,52 @@ export class Cell extends DurableObject<CellEnv> {
       this.store.deletePendingConn(relayHostId, dataConn.connId);
       runtime.activeConnIds.push(dataConn.connId);
 
-      // Find matching phone connection for this host
-      const phoneConn = this.findPhoneForConn(dataConn.connId);
-      if (!phoneConn) {
+      // Bind the channel to its phone connection
+      const phoneDeviceId = this.connPhone.get(dataConn.connId);
+      if (!phoneDeviceId || !this.phoneConns.has(phoneDeviceId)) {
         ws.close(CloseCode.HOST_OFFLINE, "no phone connected");
         return;
       }
-      dataConn.phoneWs = phoneConn.ws;
+      dataConn.authed = true;
       dataConn.relayHostId = relayHostId;
-
-      // Tag this ws with the host id now that it is resolved.
-      getWsTags(ws).push(relayHostId);
+      dataConn.phoneDeviceId = phoneDeviceId;
 
       return;
     }
 
     // Forward frames verbatim between host data socket and phone socket
-    try {
-      dataConn.phoneWs.send(raw);
-    } catch {
-      ws.close(CloseCode.PEER_DROPPED, "phone disconnected");
-    }
-  }
-
-  private handleDataClose(ws: WebSocket): void {
-    for (const [id, conn] of this.dataConns) {
-      if (conn.ws === ws) {
-        // Notify phone if connected
-        if (conn.phoneWs) {
-          try {
-            conn.phoneWs.close(CloseCode.PEER_DROPPED, "host data disconnected");
-          } catch { /* already closed */ }
-        }
-        this.dataConns.delete(id);
-        // Remove from active connections for the owning host
-        if (conn.relayHostId) {
-          const runtime = this.hosts.get(conn.relayHostId);
-          if (runtime) {
-            runtime.activeConnIds = runtime.activeConnIds.filter((cid) => cid !== id);
-          }
-        }
-        this.connHost.delete(id);
-        this.connPhone.delete(id);
-        break;
+    const target = this.findPhoneSocket(dataConn.phoneDeviceId);
+    if (target) {
+      try {
+        target.send(raw);
+      } catch {
+        ws.close(CloseCode.PEER_DROPPED, "phone disconnected");
       }
     }
   }
 
-  private findDataConn(ws: WebSocket): DataConn | undefined {
-    for (const conn of this.dataConns.values()) {
-      if (conn.ws === ws) return conn;
+  private handleDataClose(ws: WebSocket): void {
+    const id = this.connIdForSocket(ws);
+    if (!id) return;
+    const conn = this.dataConns.get(id);
+    if (!conn) return;
+    // Notify phone if connected
+    if (conn.authed) {
+      const phoneWs = this.findPhoneSocket(conn.phoneDeviceId);
+      try {
+        phoneWs?.close(CloseCode.PEER_DROPPED, "host data disconnected");
+      } catch { /* already closed */ }
     }
-    return undefined;
+    this.dataConns.delete(id);
+    // Remove from active connections for the owning host
+    if (conn.relayHostId) {
+      const runtime = this.hosts.get(conn.relayHostId);
+      if (runtime) {
+        runtime.activeConnIds = runtime.activeConnIds.filter((cid) => cid !== id);
+      }
+    }
+    this.connHost.delete(id);
+    this.connPhone.delete(id);
   }
 
   private findPhoneForConn(connId: string): PhoneConn | undefined {
@@ -1098,8 +1147,8 @@ export class Cell extends DurableObject<CellEnv> {
 
   // ------------------------------------------------------------- Public: register data conn
 
-  registerDataConn(connId: string, ws: WebSocket): void {
-    this.dataConns.set(connId, { ws, connId, relayHostId: "" });
+  registerDataConn(connId: string): void {
+    this.dataConns.set(connId, { connId, authed: false, relayHostId: "" });
   }
 }
 
@@ -1164,3 +1213,5 @@ export function createCellApp(): Hono {
 
   return app;
 }
+
+

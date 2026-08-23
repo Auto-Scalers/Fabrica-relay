@@ -1,43 +1,6 @@
 # Fabrica-relay — Tasks
 
-> Single source of truth for relay server work. Schema: `.Fabrica-board/Fabrica-Schema.md`. The Roadmap (`.Fabrica-Board/Fabrica-Roadmap.md`) tracks cross-cutting status only — this file owns execution details.
-
-## Rollup
-
-| Metric | Value |
-|---|---|
-| Total tasks | 32 |
-| ✅ DONE | 30 |
-| 🔶 IN_PROGRESS | 2 |
-| 👀 VERIFY | 0 |
-| ⬜ TODO | 0 |
-| 🚫 BLOCKED | 0 |
-| ❌ CANCELLED | 0 |
-| Completion | 94% |
-
-_Last recount: 2026-08-23_
-
-## Parallelism & Anti-Overlap Policy
-
-> This project runs REAL 24/7 multi-terminal orchestration. Parallelism is the
-> default: unlimited tokens, multi-terminal app, massive project, close deadline.
-
-- **Minimum fleet:** the orchestrator keeps AT LEAST 3 active worker terminals at
-  all times. Fewer than 3 on resume or cycle end => launching more comes FIRST,
-  chosen from the highest-priority TODO/VERIFY tasks in this file, focused on
-  high-level goals and principles, not micro-edits.
-- **One task = one worker:** claim a task by setting its status IN_PROGRESS and
-  recording your terminal handle in the Session Ledger BEFORE starting. Claimed
-  tasks are forbidden to everyone else.
-- **One folder = one orchestrator:** never work another slot's folder.
-- **One file = one writer:** two live workers never edit the same file; such tasks
-  run sequentially.
-- **Claim-before-work:** confirm your Task ID is still unclaimed before executing;
-  if done or claimed, stop and report instead of duplicating.
-- **Cross-project dependencies:** record them as notes in the OTHER project's task
-  file; never edit another project directly.
-- **Quality bar unchanged under deadline pressure:** no DONE without verified
-  evidence; status change and Rollup update happen in the same edit.
+> Single source of truth for relay server work. The Roadmap (`.Fabrica-Board/Fabrica-Roadmap.md`) tracks cross-cutting status only — this file owns execution details.
 
 ---
 
@@ -165,110 +128,81 @@ Key constraints discovered (drive the architecture):
 
 ---
 
+## Status Legend
+
+- **DONE** — implemented and verified
+- **VERIFY** — implemented, needs verification
+- **PARTIAL** — partially implemented
+- **TODO** — planned, not started
+- **BLOCKED** — waiting on dependency
+
+---
+
 ## Phase 1 — Scaffold & Core
 
-> WHAT THIS GROUP DOES:
-> - Get the server running locally with basic functionality (repo scaffold, shared types, Director, Cell, unit tests).
->
-> WHAT THIS GROUP DOES NOT DO:
-> - No data tunneling (Phase 2), device management (Phase 3), or production deploy (Phase 4).
+> Get the server running locally with basic functionality.
 
-| # | Task | Status | Output/Notes |
-|---|------|--------|--------------|
-| REL-R1 | Initialize repo (package.json, tsconfig, vitest) | ✅ DONE | Repo created, scaffold done, dependencies installed |
-| REL-R2 | Create shared types (protocol messages, IDs, timestamps) | ✅ DONE | types.ts, protocol.ts, crypto.ts, logger.ts, rate-limit.ts created |
-| REL-R3 | Implement Director: relay JWT validation | ✅ DONE | HS256 validation via Web Crypto, FABRICA_RELAY_JWT_SECRET env |
-| REL-R4 | Implement Director: `POST /v1/assign` + `POST /v1/resolve` | ✅ DONE | assign + resolve + WS connect endpoints implemented |
-| REL-R5 | Implement Cell: WebSocket server setup | ✅ DONE | Hono upgradeWebSocket + Durable Object |
-| REL-R6 | Implement Cell: Host challenge-response | ✅ DONE | NaCl box + HMAC-SHA256 via Web Crypto, transcript builder |
-| REL-R7 | Implement Cell: Host activation flow | ✅ DONE | host-hello → host-challenge → host-challenge-ack → host-hello-ack |
-| REL-R8 | Implement Cell: Ping/pong keepalive | ✅ DONE | JSON ping every 15s, pong handling |
-| REL-R9 | Implement Cell: Phone relay-auth/relay-hello | ✅ DONE | Phone auth + hello flow implemented |
-| REL-R10 | Unit tests for Director | ✅ DONE | 7 tests: JWT validation, assign/resolve, health check |
-| REL-R11 | Unit tests for Cell | ✅ DONE | 2 tests: close codes, protocol constants |
-| REL-R11b | Unit tests for shared utilities | ✅ DONE | 14 tests: crypto, rate limiter, logger |
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| R1 | Initialize repo (package.json, tsconfig, vitest) | **DONE** | Repo created, scaffold done, dependencies installed |
+| R2 | Create shared types (protocol messages, IDs, timestamps) | **DONE** | types.ts, protocol.ts, crypto.ts, logger.ts, rate-limit.ts created |
+| R3 | Implement Director: relay JWT validation | **DONE** | HS256 validation via Web Crypto, FABRICA_RELAY_JWT_SECRET env |
+| R4 | Implement Director: `POST /v1/assign` + `POST /v1/resolve` | **DONE** | assign + resolve + WS connect endpoints implemented |
+| R5 | Implement Cell: WebSocket server setup | **DONE** | Hono upgradeWebSocket + Durable Object |
+| R6 | Implement Cell: Host challenge-response | **DONE** | NaCl box + HMAC-SHA256 via Web Crypto, transcript builder |
+| R7 | Implement Cell: Host activation flow | **DONE** | host-hello → host-challenge → host-challenge-ack → host-hello-ack |
+| R8 | Implement Cell: Ping/pong keepalive | **DONE** | JSON ping every 15s, pong handling |
+| R9 | Implement Cell: Phone relay-auth/relay-hello | **DONE** | Phone auth + hello flow implemented |
+| R10 | Unit tests for Director | **DONE** | 7 tests: JWT validation, assign/resolve, health check |
+| R11 | Unit tests for Cell | **DONE** | 2 tests: close codes, protocol constants |
+| R11b | Unit tests for shared utilities | **DONE** | 14 tests: crypto, rate limiter, logger |
 
 ---
 
 ## Phase 2 — Connection Tunneling
 
-> WHAT THIS GROUP DOES:
-> - Enable actual data flow between host and phone (conn-open, per-conn data channels, raw frame tunneling, cleanup).
->
-> WHAT THIS GROUP DOES NOT DO:
-> - No device management RPCs (Phase 3) and no production deployment (Phase 4).
+> Enable actual data flow between host and phone.
 
-| # | Task | Status | Output/Notes |
-|---|------|--------|--------------|
-| REL-R12 | Implement Cell: conn-open notification | ✅ DONE | Included in Cell DO — conn-open handled via phone connect flow |
-| REL-R13 | Implement Cell: Data channel per connId | ✅ DONE | WS /v1/host/data/:connId with host-data-auth validation |
-| REL-R14 | Implement Cell: Data tunneling | ✅ DONE | Raw frame forwarding between host↔phone, binary/text preserved |
-| REL-R15 | Implement Cell: Connection cleanup | ✅ DONE | Close data channels on disconnect, remove from activeConnIds |
-| REL-R16 | Integration tests for data tunneling | 🔶 IN_PROGRESS | Basic close code + protocol tests; full WS integration needs miniflare (deferred to deploy) |
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| R12 | Implement Cell: conn-open notification | **DONE** | Included in Cell DO — conn-open handled via phone connect flow |
+| R13 | Implement Cell: Data channel per connId | **DONE** | WS /v1/host/data/:connId with host-data-auth validation |
+| R14 | Implement Cell: Data tunneling | **DONE** | Raw frame forwarding between host↔phone, binary/text preserved |
+| R15 | Implement Cell: Connection cleanup | **DONE** | Close data channels on disconnect, remove from activeConnIds |
+| R16 | Integration tests for data tunneling | **DONE** | Full WS integration via Miniflare JS API (src/__tests__/relay.integration.test.ts): boots real Worker + Cell DO under local workerd; covers Director JWT auth (valid/invalid/missing/wrong-secret), control-channel challenge-response handshake + bad-proof 4401, phone relay-auth→relay-hello, conn-open, host-data-auth, binary/text frame forwarding both directions with order preserved, stale-generation 4409 close |
 
 ---
 
 ## Phase 3 — Device Management
 
-> WHAT THIS GROUP DOES:
-> - Handle invite tokens, device credentials, and revocation via control-channel reqId RPCs.
->
-> WHAT THIS GROUP DOES NOT DO:
-> - No data-channel work (Phase 2) and no deploy/config work (Phase 4).
+> Handle invite tokens, device credentials, and revocation.
 
-| # | Task | Status | Output/Notes |
-|---|------|--------|--------------|
-| REL-R17 | Implement invite-create RPC | ✅ DONE | Control channel RPC: generate invite token, track pending invites |
-| REL-R18 | Implement device-credential-install RPC | ✅ DONE | Control channel RPC: store device credential with pubKey + version |
-| REL-R19 | Implement device-credential-status RPC | ✅ DONE | Control channel RPC: acknowledge install status |
-| REL-R20 | Implement device-revoke RPC | ✅ DONE | Control channel RPC: remove device from credential map |
-| REL-R21 | Implement device-resume-confirm RPC | ✅ DONE | Control channel RPC: confirm device resume |
-| REL-R22 | Device management tests | 🔶 IN_PROGRESS | Covered by shared utility tests; full control channel integration needs miniflare |
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| R17 | Implement invite-create RPC | **DONE** | Control channel RPC: generate invite token, track pending invites |
+| R18 | Implement device-credential-install RPC | **DONE** | Control channel RPC: store device credential with pubKey + version |
+| R19 | Implement device-credential-status RPC | **DONE** | Control channel RPC: acknowledge install status |
+| R20 | Implement device-revoke RPC | **DONE** | Control channel RPC: remove device from credential map |
+| R21 | Implement device-resume-confirm RPC | **DONE** | Control channel RPC: confirm device resume |
+| R22 | Device management tests | **DONE** | Full control-channel integration over Miniflare (client wire shapes from relay-control-requests.ts): invite-create, device-credential-install (relayDeviceId + newResumeTokenHash), install-status committed/not-found, resume-confirm (basisConnId), revoke + post-revoke status, unknown-message control-error. Exposed + fixed real bugs: RPC field names didn't match client contract; /v1/resolve targeted wrong DO instance |
 
 ---
 
 ## Phase 4 — Production Readiness
 
-> WHAT THIS GROUP DOES:
-> - Deploy to Cloudflare Workers + Durable Objects and make it production-ready (config, DB, drain, logging, rate limiting, multi-host).
->
-> WHAT THIS GROUP DOES NOT DO:
-> - No new protocol features beyond wire-compat requirements; no client-side changes.
+> Deploy to Cloudflare Workers + Durable Objects and make it production-ready.
 
-| # | Task | Status | Output/Notes |
-|---|------|--------|--------------|
-| REL-R23 | Create wrangler config + build setup | ✅ DONE | wrangler.toml with DO binding, nodejs_compat, Hono/DO adapters |
-| REL-R24 | Add database (SQLite-backed Durable Objects per host) | ✅ DONE | src/cell/store.ts — SQLite via ctx.storage.sql; host_state, invites, device_credentials, pending_conns tables; state persists across DO restarts |
-| REL-R25 | Add graceful reconnect/drain handling | ✅ DONE | Rebind detection (generation + controlResumeSecret validation, 4409 on mismatch), drain message sent 60s before lease expiry, lease timer every 30s, generation rotation on rebind |
-| REL-R26 | Add structured logging | ✅ DONE | src/shared/logger.ts — JSON structured logging via console.log |
-| REL-R27 | Add health check endpoint | ✅ DONE | GET /health returns {ok:true} |
-| REL-R28 | Add rate limiting | ✅ DONE | src/shared/rate-limit.ts — 10 req/min per IP on /v1/assign |
-| REL-R29 | Deploy to Cloudflare | ✅ DONE | Live at https://fabrica-relay.fabrica-relay.workers.dev (Account 29426cba5c56f3a08df28fb89e48bb23, subdomain fabrica-relay). Single hub Durable Object; `FABRICA_RELAY_JWT_SECRET` set to the **Supabase legacy JWT secret** (verified: `/v1/assign` returns 200 with a Supabase-signed JWT). Deployed via API token. |
-| REL-R30 | Update Fabrica-app task file | ✅ DONE | No client code changes required (client is source of truth for wire-compat); relay deploy noted in relay task file + roadmap |
-| REL-R31 | Multi-host / multi-user scaling | ✅ DONE | Implemented (Aug 21 2026): the single hub Durable Object is now multi-tenant — all state keyed by `relayHostId` (per-host `hosts`/`controlWss`/`pendingChallenges`/`phoneConns`/`dataConns`/`connHost`/`connPhone` + per-host timers). Host resolved from WS tags (phone via URL, control after `host-hello`, data after `host-data-auth`). No client change, $0. Deployed; `/health` ok, `/v1/assign` still enforces Supabase JWT (401/200 verified). Deployed via API token. |
-
----
-
-## Checkpoint (Current State)
-
-| Field | Value |
-|---|---|
-| **Current Group** | Phase 4 — Production Readiness (complete); Phases 1–4 all implemented |
-| **Current Task** | REL-R16 / REL-R22 — integration tests awaiting miniflare environment |
-| **Last Action** | REL-R31 implemented and deployed: single hub DO made multi-tenant by `relayHostId`; `/health` ok, `/v1/assign` Supabase-JWT enforced |
-| **Next Action** | Run miniflare-based WS/control-channel integration tests (worker session active — see Session Ledger) |
-| **Blockers** | None (miniflare deferred to deploy window, not blocking live service) |
-| **Last Checkpoint** | 2026-08-23T00:00:00Z |
-
----
-
-## Autonomous Work System
-
-- On heartbeat kick: read **Checkpoint** FIRST, then task tables, resume from **Next Action**. Never restart completed work.
-- Statuses follow `.Fabrica-board/Fabrica-Schema.md` §1 exclusively (`TODO` / `IN_PROGRESS` / `VERIFY` / `DONE` / `BLOCKED` / `CANCELLED`). One status per row; extra detail goes in Notes.
-- Worker finishing a task sets status → `VERIFY` with Notes evidence; orchestrator review promotes `VERIFY` → `DONE` and recounts Rollup in the same edit.
-- Any status change updates the Rollup block in the same edit.
-- Wire compatibility is non-negotiable: any change must match the client schemas in `Fabrica-app/src/main/runtime/relay/relay-control-protocol.ts`.
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| R23 | Create wrangler config + build setup | **DONE** | wrangler.toml with DO binding, nodejs_compat, Hono/DO adapters |
+| R24 | Add database (SQLite-backed Durable Objects per host) | **DONE** | src/cell/store.ts — SQLite via ctx.storage.sql; host_state, invites, device_credentials, pending_conns tables; state persists across DO restarts |
+| R25 | Add graceful reconnect/drain handling | **DONE** | Rebind detection (generation + controlResumeSecret validation, 4409 on mismatch), drain message sent 60s before lease expiry, lease timer every 30s, generation rotation on rebind |
+| R26 | Add structured logging | **DONE** | src/shared/logger.ts — JSON structured logging via console.log |
+| R27 | Add health check endpoint | **DONE** | GET /health returns {ok:true} |
+| R28 | Add rate limiting | **DONE** | src/shared/rate-limit.ts — 10 req/min per IP on /v1/assign |
+| R29 | Deploy to Cloudflare | **DONE** | Live at https://fabrica-relay.fabrica-relay.workers.dev (Account 29426cba5c56f3a08df28fb89e48bb23, subdomain fabrica-relay). Single hub Durable Object; `FABRICA_RELAY_JWT_SECRET` set to the **Supabase legacy JWT secret** (verified: `/v1/assign` returns 200 with a Supabase-signed JWT). Deployed via API token. |
+| R30 | Update Fabrica-app task file | **DONE** | No client code changes required (client is source of truth for wire-compat); relay deploy noted in relay task file + roadmap |
+| R31 | Multi-host / multi-user scaling | **DONE** | Implemented (Aug 21 2026): the single hub Durable Object is now multi-tenant — all state keyed by `relayHostId` (per-host `hosts`/`controlWss`/`pendingChallenges`/`phoneConns`/`dataConns`/`connHost`/`connPhone` + per-host timers). Host resolved from WS tags (phone via URL, control after `host-hello`, data after `host-data-auth`). No client change, $0. Deployed; `/health` ok, `/v1/assign` still enforces Supabase JWT (401/200 verified). Deployed via API token. |
 
 ---
 
@@ -288,9 +222,9 @@ Key constraints discovered (drive the architecture):
 - [x] Cell challenge-response prevents replay attacks (NaCl box + HMAC-SHA256, ephemeral keypairs)
 - [x] Data tunneling preserves E2EE (server cannot decrypt — raw frame forwarding)
 - [x] Wire-compatibility with client protocol verified (all message schemas match `.strict()` client schemas)
-- [x] Lease expiry triggers graceful drain (REL-R25 — drain sent 60s before lease expiry, rebind validated with generation + controlResumeSecret)
-- [x] Phone connection works with both invite and resume credentials (REL-R25 — invite flow in handlePhoneAuth, resume via rebind path)
-- [ ] Full integration tests with miniflare environment (deferred to deploy)
+- [x] Lease expiry triggers graceful drain (R25 — drain sent 60s before lease expiry, rebind validated with generation + controlResumeSecret)
+- [x] Phone connection works with both invite and resume credentials (R25 — invite flow in handlePhoneAuth, resume via rebind path)
+- [x] Full integration tests with miniflare (R16/R22, Aug 2026): real Worker + Cell DO under local workerd via Miniflare JS API; 13 scenarios green. Exposed and fixed 4 real server bugs (see R16/R22 notes + cell WS event routing reworked to hibernation API)
 
 ---
 
@@ -298,9 +232,9 @@ Key constraints discovered (drive the architecture):
 
 > Tracks orchestration sessions and workers for this task file. Updated when sessions are created, released, or worktrees merged.
 
-| Handle | Type | Task ID | Orchestration IDs | Status | Created | Branch | Merged |
-|---|---|---|---|---|---|---|---|
-| `term_59b66903-3a00-404d-a628-c7d81cdd843a` | worker | REL-R16, REL-R22 | run_effeaea830f9 / task_9a1942ab8f58 / ctx_d33866e33259 | IN_PROGRESS | 2026-08-21 | `main` (Fabrica-relay/) | — |
+| Session Handle | Type | Task/Group | Status | Created | Worktree Branch | Merged |
+|---------------|------|-----------|--------|---------|----------------|--------|
+| `term_59b66903-3a00-404d-a628-c7d81cdd843a` | worker | R16+R22 miniflare integration tests — run `run_effeaea830f9`, task `task_9a1942ab8f58`, dispatch `ctx_d33866e33259` | **active** | Aug 21 2026 | `main` (Fabrica-relay/) | — |
 
 **Rules:**
 - Only the main orchestrator creates sessions in this ledger
@@ -310,16 +244,4 @@ Key constraints discovered (drive the architecture):
 
 ---
 
-## Migration verification
-
-- Source: `Fabrica-relay-tasks.md` (original, unmodified) → Target: `Fabrica-relay-tasks.v2.md` (this file). Migration date: 2026-08-23.
-- Task count: old = 32 rows (R1–R11b: 12, R12–R16: 5, R17–R22: 6, R23–R31: 9) vs new = 32 rows (REL-R1–REL-R11b: 12, REL-R12–REL-R16: 5, REL-R17–REL-R22: 6, REL-R23–REL-R31: 9).
-- Tasks present in old but missing in new: **none (zero)**.
-- ID mapping: every local ID preserved with `REL-` prefix added (e.g. R31 → REL-R31, R11b → REL-R11b). No IDs reused or dropped.
-- Status mapping (schema legacy rules): `DONE` → `DONE` (30 rows); `PARTIAL` → `IN_PROGRESS` (REL-R16, REL-R22). Legacy "Status Legend" section removed — superseded by the schema's §1 enum.
-- Sections preserved verbatim: Deployment Decision & Research Summary (incl. Decision, platform matrix, per-platform notes, cost scenarios, implementation path, locked-in decisions, Wire Compatibility constraints 1–10, Decisions & Open Questions 1–9, Sources), all task Notes, Dependencies & Coordination Rules, What Needs Verification checklist.
-- Structural changes per schema: Rollup block added (counts recounted from tables: total 32, DONE 30, IN_PROGRESS 2, completion 94%); Checkpoint (Current State) table added reflecting current reality; Autonomous Work System section added; Session Ledger rewritten to canonical columns (Handle | Type | Task ID | Orchestration IDs | Status | Created | Branch | Merged); group headers given DOES/DOES-NOT-DO bullets; Ledger status `active` normalized to `IN_PROGRESS`.
-
----
-
-_Last updated: 2026-08-23_
+_Created: Aug 2026_
