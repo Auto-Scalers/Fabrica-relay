@@ -24,7 +24,7 @@
 | ❌ CANCELLED | 0 |
 | Completion | 100% |
 
-_Last recount: 2026-08-24 (orchestrator promoted REL-R16/R22 after verifying 44/44 tests + tsc clean)_
+_Last recount: 2026-08-24 (orchestrator promoted REL-R16/R22 after verifying 44/44 tests + tsc clean). Recount re-confirmed 2026-08-24 after wrangler v3→v4 tooling upgrade (task_cc7d3fa38754) — no REL row status changes, counts unchanged. Recount re-confirmed 2026-08-24 after configurable-lease/drain-test task (task_46f6da82ae0c) — no REL row status changes, counts unchanged (suite now 45/45)_
 
 ## Parallelism & Anti-Overlap Policy
 
@@ -248,7 +248,7 @@ Key constraints discovered (drive the architecture):
 |---|------|--------|--------------|
 | REL-R23 | Create wrangler config + build setup | ✅ DONE | wrangler.toml with DO binding, nodejs_compat, Hono/DO adapters |
 | REL-R24 | Add database (SQLite-backed Durable Objects per host) | ✅ DONE | src/cell/store.ts — SQLite via ctx.storage.sql; host_state, invites, device_credentials, pending_conns tables; state persists across DO restarts |
-| REL-R25 | Add graceful reconnect/drain handling | ✅ DONE | Rebind detection (generation + controlResumeSecret validation, 4409 on mismatch), drain message sent 60s before lease expiry, lease timer every 30s, generation rotation on rebind |
+| REL-R25 | Add graceful reconnect/drain handling | ✅ DONE | Rebind detection (generation + controlResumeSecret validation, 4409 on mismatch), drain message sent before lease expiry, lease timer adaptive (30s at production cadence), generation rotation on rebind. 2026-08-24: lease duration now configurable via `FABRICA_RELAY_LEASE_MS` env/wrangler var — drives BOTH `leaseExpiresAt` and drain `graceMs`; clamped to [5000, 3600000], default 3600000 (production behavior unchanged; wire format unchanged — graceMs ≤ 3,600,000 + recovery literal `resolve-director` preserved). Drain path now covered by a real integration test: `src/__tests__/lease-drain.integration.test.ts` boots an isolated Miniflare instance with FABRICA_RELAY_LEASE_MS=6000, completes host challenge-response, asserts strict client-style schema parse of `{type:'drain', graceMs:6000, recovery:'resolve-director'}` arriving BEFORE lease expiry, then clean control-socket close. Previous limitation "drain JSON path not triggerable in-process" is now COVERED. Note: server does not emit close 4503 DRAINING (client-synthesized) — unchanged. |
 | REL-R26 | Add structured logging | ✅ DONE | src/shared/logger.ts — JSON structured logging via console.log |
 | REL-R27 | Add health check endpoint | ✅ DONE | GET /health returns {ok:true} |
 | REL-R28 | Add rate limiting | ✅ DONE | src/shared/rate-limit.ts — 10 req/min per IP on /v1/assign |
@@ -263,9 +263,9 @@ Key constraints discovered (drive the architecture):
 | Field | Value |
 |---|---|
 | **Current Group** | Phase 4 — Production Readiness (complete); Phases 1–4 all implemented. **All 32 tasks DONE (100%)** |
-| **Current Task** | None — REL-R16/R22 promoted to DONE 2026-08-24 after orchestrator review |
-| **Last Action** | 2026-08-24 orchestrator review pass: ran full suite myself (44/44, 24 unit + 20 integration), `npx tsc --noEmit` exit 0, verified all fix diffs in source; live deploy re-verified (/health 200 {ok:true} 150ms, /v1/assign no-auth 401, garbage Bearer 401, /v1/resolve empty body 400). Wire-compat fix pass (task_72932a86de18): BUG1 /v1/resolve cellUrl now derived from public worker origin (`X-Fabrica-Public-Origin` header); BUG2 `getPendingConns` explicit columns (no host_id leak); BUG3 `/v1/connect/<id>` first-frame dispatch → relay-moved for non-`relay-auth` frames |
-| **Next Action** | Changes are UNCOMMITTED and UNDEPLOYED — PM commits/pushes, then redeploy (`wrangler deploy`) so live picks up the 3 wire-compat fixes. Known limitation: close 4503 DRAINING is client-synthesized; drain JSON path not triggerable in-process. Design note: single-deployment topology means relay-moved is emitted only when first frame ≠ relay-auth; multi-origin deployments would need origin-based routing |
+| **Current Task** | Lease-drain-test (task_46f6da82ae0c) — work complete, awaiting orchestrator review |
+| **Last Action** | 2026-08-24 configurable lease + real drain-path integration test: `FABRICA_RELAY_LEASE_MS` env/wrangler var (default "3600000", clamped [5000, 3600000], NaN→default) now drives `leaseExpiresAt` AND drain `graceMs` in src/cell/index.ts (previously hardcoded in ~6 places); drain warning window scales with lease (min(60s, lease/2)) and lease-timer poll is adaptive (30s at production cadence) so short leases still get a pre-expiry drain. Wire format unchanged. New test `src/__tests__/lease-drain.integration.test.ts` + shared helpers extracted to `src/__tests__/ws-helpers.ts`; harness now supports isolated per-binding Miniflare instances. Verified: `pnpm test` 8 files / 45 tests passed (44 prior + 1 new); `npx tsc --noEmit` exit 0; `wrangler deploy --dry-run` lists FABRICA_RELAY_LEASE_MS binding. No deploy/commit performed |
+| **Next Action** | Orchestrator: review diff, promote Lease-drain-test row/ledger; optional follow-up — set FABRICA_RELAY_LEASE_MS explicitly at deploy time if a non-default lease is ever wanted |
 | **Blockers** | None |
 | **Last Checkpoint** | 2026-08-24 |
 
@@ -297,9 +297,9 @@ Key constraints discovered (drive the architecture):
 - [x] Cell challenge-response prevents replay attacks (NaCl box + HMAC-SHA256, ephemeral keypairs)
 - [x] Data tunneling preserves E2EE (server cannot decrypt — raw frame forwarding)
 - [x] Wire-compatibility with client protocol verified (all message schemas match `.strict()` client schemas)
-- [x] Lease expiry triggers graceful drain (REL-R25 — drain sent 60s before lease expiry, rebind validated with generation + controlResumeSecret)
+- [x] Lease expiry triggers graceful drain (REL-R25 — drain sent before lease expiry with `graceMs` = configured lease, rebind validated with generation + controlResumeSecret; 2026-08-24: drain path verified end-to-end by short-lease integration test)
 - [x] Phone connection works with both invite and resume credentials (REL-R25 — invite flow in handlePhoneAuth, resume via rebind path)
-- [x] Full integration tests with miniflare environment (2026-08-24: 17 integration tests under workerd — Director auth, challenge-response, keepalive, device RPCs, tunneling, close codes; 4503/drain path documented as not in-process triggerable)
+- [x] Full integration tests with miniflare environment (2026-08-24: 17 integration tests under workerd — Director auth, challenge-response, keepalive, device RPCs, tunneling, close codes; 2026-08-24: +1 lease-drain integration test — drain JSON path now in-process covered; only the 4503 close remains client-synthesized)
 - [x] Wire-compat bug fixes verified (2026-08-24: resolve cellUrl = public https origin; pendingConns exact `{connId, connTicket}` keys after storage reload; relay-moved on `/v1/connect` non-relay-auth first frame — 3 new integration tests, suite 44/44)
 
 ---
@@ -314,7 +314,9 @@ Key constraints discovered (drive the architecture):
 | R16R22-closeout | worker | REL-R16, REL-R22 | run_08477275642d / task_5ff46aec5527 / ctx_a163f68f51c5 | done + reviewed (44/44 verified) — released 2026-08-24 | 2026-08-24 | `main` (Fabrica-relay/) | — (direct on main) |
 | Wire-compat-audit → fixer | worker | audit; FIX 3 bugs (task_72932a86de18) | run_08477275642d / task_9ed6b3aac089, task_72932a86de18 / ctx_f56496de6b83, ctx_1766689ec7aa | done + reviewed (diffs verified, 44/44, tsc 0) — released 2026-08-24 | 2026-08-24 | `main` (Fabrica-relay/) | — (direct on main) |
 | Live-deploy-verify | worker | live deploy check (read-only) | run_08477275642d / task_63febdbc8f81 / ctx_c0f34444626f | done (results read from terminal after provider network errors; /health gap filled by orchestrator) — released 2026-08-24 | 2026-08-24 | `main` (Fabrica-relay/) | n/a (read-only) |
-
+| Wrangler-v4-upgrade | worker | wrangler v3→v4 hygiene (task_cc7d3fa38754) | run_08477275642d / task_cc7d3fa38754 / ctx_2cbb90f8babe | done + reviewed (orchestrator verified ^4.125.0 on disk, 44/44, tsc 0) — closed 2026-08-24 | 2026-08-24 | `main` (Fabrica-relay/) | — (direct on main) |
+| E2E-pairing-proof | worker | real client-code pairing E2E vs local wrangler dev (task_27ed39819b46) | run_08477275642d / task_27ed39819b46 / ctx_e010518b5266 | CANCELLED — Windows process launch failure, orphaned wrangler dev cleaned up | 2026-08-24 | `main` (Fabrica-relay/) | — (direct on main) |
+| Lease-drain-test | worker | configurable lease + drain integration test (task_46f6da82ae0c) | run_08477275642d / task_46f6da82ae0c / ctx_11bb302219a6 | done + orchestrator-verified (45/45, tsc clean) — closed 2026-08-24 | 2026-08-24 | `main` (Fabrica-relay/) | — (direct on main) |
 **Rules:**
 - Only the main orchestrator creates sessions in this ledger
 - Workers are released after review

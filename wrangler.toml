@@ -17,3 +17,5 @@ new_sqlite_classes = ["Cell"]
 # Set via `wrangler secret put FABRICA_RELAY_JWT_SECRET`
 # DIRECTOR_URL is the production URL (free workers.dev subdomain)
 DIRECTOR_URL = "https://fabrica-relay.fabrica-relay.workers.dev"
+# Host lease duration in ms — also used as drain graceMs. Clamped to [5000, 3600000]
+FABRICA_RELAY_LEASE_MS = "3600000"

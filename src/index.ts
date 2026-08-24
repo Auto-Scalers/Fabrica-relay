@@ -7,6 +7,7 @@ type Bindings = {
   CELL: DurableObjectNamespace;
   FABRICA_RELAY_JWT_SECRET: string;
   DIRECTOR_URL: string;
+  FABRICA_RELAY_LEASE_MS?: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();

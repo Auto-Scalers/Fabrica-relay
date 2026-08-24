@@ -8,16 +8,20 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { getWorker, stopRelay } from "./harness";
-import { nacl, hmacSha256Bytes } from "../shared/crypto";
 import {
-  HOST_PROOF_TRANSCRIPT_DOMAIN,
-  HOST_CHALLENGE_PLAINTEXT_DOMAIN,
-} from "../shared/protocol";
+  TestSocket,
+  connectWs,
+  hostHandshake,
+  toB64,
+  type FetchLike,
+} from "./ws-helpers";
+import { nacl } from "../shared/crypto";
 
 const TEST_SECRET = "integration-test-secret";
 const ORIGIN = "https://fabrica-relay.test";
 
 let worker: { fetch: (input: string, init?: RequestInit) => Promise<Response> };
+const fetchFn: FetchLike = (input, init) => worker.fetch(input, init);
 
 beforeAll(async () => {
   worker = await getWorker();
@@ -29,180 +33,9 @@ afterAll(async () => {
 
 // ---------------------------------------------------------------- helpers
 
-class TestSocket {
-  readonly ws: WebSocket;
-  closed = false;
-  closeCode?: number;
-  private queue: (string | ArrayBuffer)[] = [];
-  private waiters: { resolve: (m: string | ArrayBuffer) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }[] = [];
-  private closeWaiters: ((code: number) => void)[] = [];
-
-  constructor(ws: WebSocket) {
-    this.ws = ws;
-    ws.accept();
-    ws.addEventListener("message", (evt: MessageEvent) => {
-      const data = evt.data as string | ArrayBuffer;
-      const w = this.waiters.shift();
-      if (w) {
-        clearTimeout(w.timer);
-        w.resolve(data);
-      } else {
-        this.queue.push(data);
-      }
-    });
-    ws.addEventListener("close", (evt: CloseEvent) => {
-      this.closed = true;
-      this.closeCode = evt.code;
-      for (const cw of this.closeWaiters.splice(0)) cw(evt.code);
-      for (const w of this.waiters.splice(0)) {
-        clearTimeout(w.timer);
-        w.reject(new Error(`socket closed (${evt.code}) while waiting for message`));
-      }
-    });
-  }
-
-  send(data: string | Uint8Array): void {
-    this.ws.send(data as unknown as ArrayBuffer);
-  }
-
-  async nextRaw(timeoutMs = 8000): Promise<string | ArrayBuffer> {
-    const queued = this.queue.shift();
-    if (queued !== undefined) return queued;
-    return new Promise<string | ArrayBuffer>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const idx = this.waiters.findIndex((w) => w.timer === timer);
-        if (idx >= 0) this.waiters.splice(idx, 1);
-        reject(new Error(`timeout waiting for WS message (closed=${this.closed})`));
-      }, timeoutMs);
-      this.waiters.push({ resolve, reject, timer });
-    });
-  }
-
-  async nextJson(): Promise<Record<string, unknown>> {
-    for (;;) {
-      const raw = await this.nextRaw();
-      if (typeof raw !== "string") throw new Error("expected text message");
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      // Server keepalive pings are not what callers are matching on
-      if (parsed.type === "ping") continue;
-      return parsed;
-    }
-  }
-
-  async nextClose(timeoutMs = 8000): Promise<number> {
-    if (this.closed) return this.closeCode ?? -1;
-    return new Promise<number>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("timeout waiting for WS close")), timeoutMs);
-      this.closeWaiters.push((code) => {
-        clearTimeout(timer);
-        resolve(code);
-      });
-    });
-  }
-
-  // Wait for the close to round-trip so the DO processes it (stops its
-  // timers) before the test ends and vitest-pool-workers flushes storage
-  async close(): Promise<void> {
-    try {
-      this.ws.close();
-      if (!this.closed) await this.nextClose();
-    } catch {
-      /* already closed */
-    }
-  }
-}
-
-async function connectWs(path: string): Promise<TestSocket> {
-  const res = await worker.fetch(`${ORIGIN}${path}`, {
-    headers: { Upgrade: "websocket" },
-  });
-  if (res.status !== 101 || !res.webSocket) {
-    throw new Error(`expected 101 upgrade, got ${res.status}`);
-  }
-  return new TestSocket(res.webSocket);
-}
-
-function toB64(bytes: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-  return btoa(s);
-}
-
-function b64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
-
-function base64UrlToBytes(s: string): Uint8Array {
-  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
-  return b64ToBytes(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
-}
-
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
-}
-
-interface HostSession {
-  ctrl: TestSocket;
-  ack: Record<string, unknown>;
-  secretKey: Uint8Array;
-}
-
-// Full host control-channel openInitial flow:
-// host-hello -> host-challenge -> decrypt NaCl box -> HMAC proof -> host-hello-ack
-async function hostHandshake(relayHostId: string): Promise<HostSession> {
-  const ctrl = await connectWs("/v1/host/control");
-  const kp = nacl.box.keyPair();
-
-  ctrl.send(
-    JSON.stringify({
-      type: "host-hello",
-      v: 1,
-      relayHostId,
-      hostPublicKeyB64: toB64(kp.publicKey),
-      assignmentEpoch: Date.now(),
-    }),
-  );
-
-  const challenge = await ctrl.nextJson();
-  expect(challenge.type).toBe("host-challenge");
-
-  // Decrypt: plaintext = domain\0 + transcript + secret(32)
-  const plaintext = nacl.box.open(
-    b64ToBytes(challenge.ciphertextB64 as string),
-    base64UrlToBytes(challenge.nonceB64 as string),
-    b64ToBytes(challenge.relayEphemeralPublicKeyB64 as string),
-    kp.secretKey,
-  );
-  expect(plaintext).not.toBeNull();
-
-  const domainLen = new TextEncoder().encode(HOST_CHALLENGE_PLAINTEXT_DOMAIN).length + 1;
-  const secret = plaintext!.slice(plaintext!.length - 32);
-  const transcript = plaintext!.slice(domainLen, plaintext!.length - 32);
-
-  const prefix = new TextEncoder().encode(`${HOST_PROOF_TRANSCRIPT_DOMAIN}\0ack\0`);
-  const proof = await hmacSha256Bytes(secret, concat(prefix, transcript));
-
-  ctrl.send(
-    JSON.stringify({
-      type: "host-challenge-ack",
-      challengeId: challenge.challengeId,
-      proofB64: toB64(proof),
-    }),
-  );
-
-  const ack = await ctrl.nextJson();
-  return { ctrl, ack, secretKey: kp.secretKey };
-}
-
 // Phone cell connection: relay-auth -> relay-hello(ok:true)
 async function connectPhone(relayHostId: string, credential: string): Promise<TestSocket> {
-  const phone = await connectWs(`/v1/connect/${encodeURIComponent(relayHostId)}`);
+  const phone = await connectWs(fetchFn, `/v1/connect/${encodeURIComponent(relayHostId)}`);
   phone.send(JSON.stringify({ type: "relay-auth", v: 1, mode: "connect", credential }));
   const hello = await phone.nextJson();
   expect(hello.type).toBe("relay-hello");
@@ -293,7 +126,7 @@ describe("Director POST /v1/assign (integration)", () => {
 
 describe("Cell control channel (integration)", () => {
   it("completes the challenge-response handshake and returns host-hello-ack", async () => {
-    const session = await hostHandshake("ctrl-ok-host");
+    const session = await hostHandshake(fetchFn, "ctrl-ok-host");
     const ack = session.ack;
 
     expect(ack.type).toBe("host-hello-ack");
@@ -310,7 +143,7 @@ describe("Cell control channel (integration)", () => {
   });
 
   it("closes with 4401 BAD_OUTER_CREDENTIAL on a bad proof", async () => {
-    const ctrl = await connectWs("/v1/host/control");
+    const ctrl = await connectWs(fetchFn, "/v1/host/control");
     const kp = nacl.box.keyPair();
     ctrl.send(
       JSON.stringify({
@@ -338,7 +171,7 @@ describe("Cell control channel (integration)", () => {
 
 describe("Ping/pong keepalive (integration)", () => {
   it("sends {type:'ping', t} every 15s and keeps the control channel alive after pong", async () => {
-    const session = await hostHandshake("keepalive-host");
+    const session = await hostHandshake(fetchFn, "keepalive-host");
 
     // Server-driven app-level JSON ping (protocol pings do NOT satisfy the client watchdog)
     const raw = await session.ctrl.nextRaw(20000);
@@ -368,7 +201,7 @@ describe("Ping/pong keepalive (integration)", () => {
 
 describe("Device management RPCs over control channel (integration)", () => {
   it("runs invite-create -> credential-install -> status -> resume-confirm -> revoke", async () => {
-    const session = await hostHandshake("device-rpc-host");
+    const session = await hostHandshake(fetchFn, "device-rpc-host");
     const ctrl = session.ctrl;
 
     // invite-create (client wire shape)
@@ -480,7 +313,7 @@ describe("Device management RPCs over control channel (integration)", () => {
   });
 
   it("replies control-error for an unknown message type", async () => {
-    const session = await hostHandshake("device-error-host");
+    const session = await hostHandshake(fetchFn, "device-error-host");
     session.ctrl.send(JSON.stringify({ type: "no-such-message", reqId: "req-e1" }));
     const err = await session.ctrl.nextJson();
     expect(err.type).toBe("control-error");
@@ -490,7 +323,7 @@ describe("Device management RPCs over control channel (integration)", () => {
   });
 
   it("rejects device-credential-install without relayDeviceId", async () => {
-    const session = await hostHandshake("device-nofield-host");
+    const session = await hostHandshake(fetchFn, "device-nofield-host");
     session.ctrl.send(
       JSON.stringify({
         type: "device-credential-install",
@@ -512,7 +345,7 @@ describe("Device management RPCs over control channel (integration)", () => {
 describe("Data tunneling (integration)", () => {
   it("tunnels binary and text frames end-to-end between host and phone", async () => {
     const relayHostId = "tunnel-host-1";
-    const session = await hostHandshake(relayHostId);
+    const session = await hostHandshake(fetchFn, relayHostId);
     const generation = Number(session.ack.generation);
 
     // Phone connects and authenticates with an invite credential
@@ -528,7 +361,7 @@ describe("Data tunneling (integration)", () => {
     expect(Number(connOpen.attachDeadlineMs)).toBeLessThanOrEqual(60000);
 
     // Host attaches the data socket within the deadline
-    const data = await connectWs(`/v1/host/data/${connOpen.connId}`);
+    const data = await connectWs(fetchFn, `/v1/host/data/${connOpen.connId}`);
     data.send(
       JSON.stringify({
         type: "host-data-auth",
@@ -569,13 +402,13 @@ describe("Data tunneling (integration)", () => {
 
   it("closes the data socket with 4409 WRONG_CELL on a stale generation", async () => {
     const relayHostId = "tunnel-stale-gen-host";
-    const session = await hostHandshake(relayHostId);
+    const session = await hostHandshake(fetchFn, relayHostId);
     const phone = await connectPhone(relayHostId, "invite-token-stale-gen");
 
     const connOpen = await session.ctrl.nextJson();
     expect(connOpen.type).toBe("conn-open");
 
-    const data = await connectWs(`/v1/host/data/${connOpen.connId}`);
+    const data = await connectWs(fetchFn, `/v1/host/data/${connOpen.connId}`);
     data.send(
       JSON.stringify({
         type: "host-data-auth",
@@ -594,7 +427,7 @@ describe("Data tunneling (integration)", () => {
   it("closes the data socket with 4404 HOST_OFFLINE for a connection with no host", async () => {
     // Data sockets may be opened for any connId; one the server never issued
     // has no host mapping → 4404 HOST_OFFLINE on attach
-    const data = await connectWs("/v1/host/data/never-issued-conn-id");
+    const data = await connectWs(fetchFn, "/v1/host/data/never-issued-conn-id");
     data.send(
       JSON.stringify({
         type: "host-data-auth",
@@ -608,13 +441,13 @@ describe("Data tunneling (integration)", () => {
 
   it("closes the phone socket with 4408 PEER_DROPPED when the host data channel drops", async () => {
     const relayHostId = "tunnel-peer-drop-host";
-    const session = await hostHandshake(relayHostId);
+    const session = await hostHandshake(fetchFn, relayHostId);
     const phone = await connectPhone(relayHostId, "invite-token-peer-drop");
 
     const connOpen = await session.ctrl.nextJson();
     expect(connOpen.type).toBe("conn-open");
 
-    const data = await connectWs(`/v1/host/data/${connOpen.connId}`);
+    const data = await connectWs(fetchFn, `/v1/host/data/${connOpen.connId}`);
     data.send(
       JSON.stringify({
         type: "host-data-auth",
@@ -635,7 +468,7 @@ describe("Data tunneling (integration)", () => {
 
   it("rejects the 9th pending connection with relay-hello ok:false + 4429 LIMIT_EXCEEDED", async () => {
     const relayHostId = "limit-exceeded-host";
-    const session = await hostHandshake(relayHostId);
+    const session = await hostHandshake(fetchFn, relayHostId);
 
     // Fill all 8 pending slots (sockets stay open, never attach data)
     const phones: TestSocket[] = [];
@@ -646,7 +479,7 @@ describe("Data tunneling (integration)", () => {
     }
 
     // The 9th is over the limit: relay-hello {ok:false, code:4429} then close 4429
-    const ninth = await connectWs(`/v1/connect/${encodeURIComponent(relayHostId)}`);
+    const ninth = await connectWs(fetchFn, `/v1/connect/${encodeURIComponent(relayHostId)}`);
     ninth.send(
       JSON.stringify({ type: "relay-auth", v: 1, mode: "connect", credential: "invite-limit-overflow" }),
     );
@@ -666,9 +499,9 @@ describe("Data tunneling (integration)", () => {
 describe("Phone invite-recovery relay-moved (integration)", () => {
   it("replies relay-moved to a /v1/connect dial whose first frame is not relay-auth", async () => {
     const relayHostId = "relay-moved-host";
-    const session = await hostHandshake(relayHostId);
+    const session = await hostHandshake(fetchFn, relayHostId);
 
-    const probe = await connectWs(`/v1/connect/${encodeURIComponent(relayHostId)}`);
+    const probe = await connectWs(fetchFn, `/v1/connect/${encodeURIComponent(relayHostId)}`);
     probe.send(JSON.stringify({ type: "status.probe" }));
     const moved = await probe.nextJson();
     expect(moved.type).toBe("relay-moved");
@@ -685,7 +518,7 @@ describe("Phone invite-recovery relay-moved (integration)", () => {
 
   it("still serves the cell invite flow (relay-hello) for a relay-auth first frame", async () => {
     const relayHostId = "relay-moved-vs-hello-host";
-    const session = await hostHandshake(relayHostId);
+    const session = await hostHandshake(fetchFn, relayHostId);
     const phone = await connectPhone(relayHostId, "invite-token-moved-probe");
     const connOpen = await session.ctrl.nextJson();
     expect(connOpen.type).toBe("conn-open");
@@ -697,7 +530,7 @@ describe("Phone invite-recovery relay-moved (integration)", () => {
 describe("host-hello-ack pendingConns wire shape (integration)", () => {
   it("serves persisted pendingConns with exact {connId, connTicket} keys (no column leakage)", async () => {
     const relayHostId = "pending-conn-leak-host";
-    const s1 = await hostHandshake(relayHostId);
+    const s1 = await hostHandshake(fetchFn, relayHostId);
 
     // Create a pending connection that is persisted but never attached
     const phone = await connectPhone(relayHostId, "invite-token-leak-probe");
@@ -707,7 +540,7 @@ describe("host-hello-ack pendingConns wire shape (integration)", () => {
     // Re-handshake: the DO re-reads pendingConns from SQLite for the ack
     await s1.ctrl.close();
     await phone.close();
-    const s2 = await hostHandshake(relayHostId);
+    const s2 = await hostHandshake(fetchFn, relayHostId);
     const ack = s2.ack;
     expect(Array.isArray(ack.pendingConns)).toBe(true);
     expect((ack.pendingConns as unknown[]).length).toBeGreaterThanOrEqual(1);
@@ -724,7 +557,7 @@ describe("host-hello-ack pendingConns wire shape (integration)", () => {
 describe("Director POST /v1/resolve (integration)", () => {
   it("resolves a host with live state through the real Durable Object", async () => {
     const relayHostId = "resolve-live-host";
-    const session = await hostHandshake(relayHostId);
+    const session = await hostHandshake(fetchFn, relayHostId);
 
     const res = await worker.fetch(`${ORIGIN}/v1/resolve`, {
       method: "POST",

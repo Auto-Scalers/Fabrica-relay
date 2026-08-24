@@ -82,6 +82,19 @@ function encodeString(s: string): Uint8Array {
 
 interface CellEnv {
   CELL: DurableObjectNamespace;
+  FABRICA_RELAY_LEASE_MS?: string;
+}
+
+// Host lease duration (also used as drain graceMs). Configurable via
+// FABRICA_RELAY_LEASE_MS; clamped to sane bounds, default unchanged.
+const DEFAULT_LEASE_MS = 3_600_000;
+const MIN_LEASE_MS = 5_000;
+const MAX_LEASE_MS = 3_600_000;
+
+function resolveLeaseMs(raw: string | undefined): number {
+  const n = raw === undefined ? NaN : Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_LEASE_MS;
+  return Math.min(MAX_LEASE_MS, Math.max(MIN_LEASE_MS, Math.floor(n)));
 }
 
 interface RuntimeState {
@@ -229,6 +242,7 @@ export class Cell extends DurableObject<CellEnv> {
   private connPhone: Map<string, string> = new Map();
   private pingTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
   private leaseTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
+  private readonly leaseMs: number;
   private logger = createLogger("cell");
 
   private static readonly MAX_ACTIVE_CONNS = 8;
@@ -236,6 +250,7 @@ export class Cell extends DurableObject<CellEnv> {
 
   constructor(ctx: DurableObjectState, env: CellEnv) {
     super(ctx, env);
+    this.leaseMs = resolveLeaseMs(env.FABRICA_RELAY_LEASE_MS);
     this.store = new CellStore(ctx);
     const rows = this.store.getAllHostStates();
     for (const s of rows) {
@@ -552,7 +567,7 @@ export class Cell extends DurableObject<CellEnv> {
       assignmentEpoch: msg.assignmentEpoch,
       generation: finalGen,
       controlResumeSecret: existing?.stored.controlResumeSecret ?? generateBase64Url32(),
-      leaseExpiresAt: Date.now() + 3600000,
+      leaseExpiresAt: Date.now() + this.leaseMs,
       appVersion: msg.appVersion ?? "",
     };
     this.store.putHostState(relayHostId, stored);
@@ -728,7 +743,7 @@ export class Cell extends DurableObject<CellEnv> {
       reqId,
       authorizationMode: "relay-basis",
       currentVersion: 1,
-      resumeExpiresAt: Date.now() + 3600000,
+      resumeExpiresAt: Date.now() + this.leaseMs,
     }));
   }
 
@@ -756,7 +771,7 @@ export class Cell extends DurableObject<CellEnv> {
           reqId,
           authorizationMode: "relay-basis",
           currentVersion: cred.version,
-          resumeExpiresAt: Date.now() + 3600000,
+          resumeExpiresAt: Date.now() + this.leaseMs,
         },
       }));
     } else {
@@ -809,7 +824,7 @@ export class Cell extends DurableObject<CellEnv> {
       currentVersion: 1,
       acceptedAs: "current",
       renewed: false,
-      resumeExpiresAt: Date.now() + 3600000,
+      resumeExpiresAt: Date.now() + this.leaseMs,
     }));
   }
 
@@ -842,25 +857,30 @@ export class Cell extends DurableObject<CellEnv> {
     const runtime = this.hosts.get(relayHostId);
     const controlWs = this.controlWss.get(relayHostId);
     if (!runtime || !controlWs) return;
-    if (Date.now() >= runtime.stored.leaseExpiresAt - 60000) {
+    // Warn shortly before expiry — with short leases the window scales down
+    const drainWindowMs = Math.min(60_000, Math.floor(this.leaseMs / 2));
+    if (Date.now() >= runtime.stored.leaseExpiresAt - drainWindowMs) {
       try {
         controlWs.send(JSON.stringify({
           type: "drain",
-          graceMs: 3600000,
+          graceMs: this.leaseMs,
           recovery: "resolve-director",
         }));
       } catch {
         this.stopLeaseTimer(relayHostId);
         return;
       }
-      runtime.stored.leaseExpiresAt = Date.now() + 3600000;
+      runtime.stored.leaseExpiresAt = Date.now() + this.leaseMs;
       this.store.putHostState(relayHostId, runtime.stored);
     }
   }
 
   private startLeaseTimer(relayHostId: string): void {
     this.stopLeaseTimer(relayHostId);
-    const timer = setInterval(() => this.checkLeaseExpiry(relayHostId), 30000);
+    // Poll at least 4x per lease so the drain fires before expiry even for
+    // short test leases; production (1h) keeps the 30s cadence
+    const pollMs = Math.min(30_000, Math.max(1_000, Math.floor(this.leaseMs / 4)));
+    const timer = setInterval(() => this.checkLeaseExpiry(relayHostId), pollMs);
     this.leaseTimers.set(relayHostId, timer);
   }
 
@@ -1027,7 +1047,7 @@ export class Cell extends DurableObject<CellEnv> {
       type: "relay-hello",
       ok: true,
       credentialKind: "invite",
-      leaseExpiresAt: (Date.now() + 3600000) as EpochMs,
+      leaseExpiresAt: (Date.now() + this.leaseMs) as EpochMs,
     };
     ws.send(JSON.stringify(helloMsg));
 
