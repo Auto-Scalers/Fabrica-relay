@@ -16,15 +16,15 @@
 | Metric | Value |
 |---|---|
 | Total tasks | 32 |
-| ✅ DONE | 30 |
-| 🔶 IN_PROGRESS | 2 |
+| ✅ DONE | 32 |
+| 🔶 IN_PROGRESS | 0 |
 | 👀 VERIFY | 0 |
 | ⬜ TODO | 0 |
 | 🚫 BLOCKED | 0 |
 | ❌ CANCELLED | 0 |
-| Completion | 94% |
+| Completion | 100% |
 
-_Last recount: 2026-08-23_
+_Last recount: 2026-08-24 (orchestrator promoted REL-R16/R22 after verifying 44/44 tests + tsc clean)_
 
 ## Parallelism & Anti-Overlap Policy
 
@@ -213,7 +213,7 @@ Key constraints discovered (drive the architecture):
 | REL-R13 | Implement Cell: Data channel per connId | ✅ DONE | WS /v1/host/data/:connId with host-data-auth validation |
 | REL-R14 | Implement Cell: Data tunneling | ✅ DONE | Raw frame forwarding between host↔phone, binary/text preserved |
 | REL-R15 | Implement Cell: Connection cleanup | ✅ DONE | Close data channels on disconnect, remove from activeConnIds |
-| REL-R16 | Integration tests for data tunneling | 🔶 IN_PROGRESS | Basic close code + protocol tests; full WS integration needs miniflare (deferred to deploy) |
+| REL-R16 | Integration tests for data tunneling | ✅ DONE | 2026-08-24 orchestrator-verified: miniflare suite (src/__tests__/relay.integration.test.ts + harness.ts, real Worker + Cell DO under workerd). Data tunneling covered: conn-open wire shape, host-data-auth, binary/text raw frame forwarding preserving order, 4409 stale-generation close, 4404 no-host close, 4408 phone PEER_DROPPED on host data drop. Full suite 44/44 green (24 unit + 20 integration), tsc clean (run by orchestrator). |
 
 ---
 
@@ -232,7 +232,7 @@ Key constraints discovered (drive the architecture):
 | REL-R19 | Implement device-credential-status RPC | ✅ DONE | Control channel RPC: acknowledge install status |
 | REL-R20 | Implement device-revoke RPC | ✅ DONE | Control channel RPC: remove device from credential map |
 | REL-R21 | Implement device-resume-confirm RPC | ✅ DONE | Control channel RPC: confirm device resume |
-| REL-R22 | Device management tests | 🔶 IN_PROGRESS | Covered by shared utility tests; full control channel integration needs miniflare |
+| REL-R22 | Device management tests | ✅ DONE | 2026-08-24 orchestrator-verified: miniflare control-channel integration covered: host challenge-response (NaCl box + HMAC proof) → host-hello-ack strict shape, 15s JSON ping `{type:'ping',t}` + pong keepalive, invite-create/credential-install/status (committed + not-found)/resume-confirm/revoke RPCs with client wire shapes, control-error on unknown/invalid messages, close codes 4401 (bad proof) and 4429 (9th pending conn → relay-hello ok:false code 4429 then close 4429). Note: server never emits close 4503 DRAINING - client-synthesized; not triggerable in-process. Full suite 44/44 green, tsc clean (run by orchestrator). |
 
 ---
 
@@ -262,12 +262,12 @@ Key constraints discovered (drive the architecture):
 
 | Field | Value |
 |---|---|
-| **Current Group** | Phase 4 — Production Readiness (complete); Phases 1–4 all implemented |
-| **Current Task** | REL-R16 / REL-R22 — integration tests awaiting miniflare environment |
-| **Last Action** | REL-R31 implemented and deployed: single hub DO made multi-tenant by `relayHostId`; `/health` ok, `/v1/assign` Supabase-JWT enforced |
-| **Next Action** | Run miniflare-based WS/control-channel integration tests (worker session active — see Session Ledger) |
-| **Blockers** | None (miniflare deferred to deploy window, not blocking live service) |
-| **Last Checkpoint** | 2026-08-23T00:00:00Z |
+| **Current Group** | Phase 4 — Production Readiness (complete); Phases 1–4 all implemented. **All 32 tasks DONE (100%)** |
+| **Current Task** | None — REL-R16/R22 promoted to DONE 2026-08-24 after orchestrator review |
+| **Last Action** | 2026-08-24 orchestrator review pass: ran full suite myself (44/44, 24 unit + 20 integration), `npx tsc --noEmit` exit 0, verified all fix diffs in source; live deploy re-verified (/health 200 {ok:true} 150ms, /v1/assign no-auth 401, garbage Bearer 401, /v1/resolve empty body 400). Wire-compat fix pass (task_72932a86de18): BUG1 /v1/resolve cellUrl now derived from public worker origin (`X-Fabrica-Public-Origin` header); BUG2 `getPendingConns` explicit columns (no host_id leak); BUG3 `/v1/connect/<id>` first-frame dispatch → relay-moved for non-`relay-auth` frames |
+| **Next Action** | Changes are UNCOMMITTED and UNDEPLOYED — PM commits/pushes, then redeploy (`wrangler deploy`) so live picks up the 3 wire-compat fixes. Known limitation: close 4503 DRAINING is client-synthesized; drain JSON path not triggerable in-process. Design note: single-deployment topology means relay-moved is emitted only when first frame ≠ relay-auth; multi-origin deployments would need origin-based routing |
+| **Blockers** | None |
+| **Last Checkpoint** | 2026-08-24 |
 
 ---
 
@@ -299,7 +299,8 @@ Key constraints discovered (drive the architecture):
 - [x] Wire-compatibility with client protocol verified (all message schemas match `.strict()` client schemas)
 - [x] Lease expiry triggers graceful drain (REL-R25 — drain sent 60s before lease expiry, rebind validated with generation + controlResumeSecret)
 - [x] Phone connection works with both invite and resume credentials (REL-R25 — invite flow in handlePhoneAuth, resume via rebind path)
-- [ ] Full integration tests with miniflare environment (deferred to deploy)
+- [x] Full integration tests with miniflare environment (2026-08-24: 17 integration tests under workerd — Director auth, challenge-response, keepalive, device RPCs, tunneling, close codes; 4503/drain path documented as not in-process triggerable)
+- [x] Wire-compat bug fixes verified (2026-08-24: resolve cellUrl = public https origin; pendingConns exact `{connId, connTicket}` keys after storage reload; relay-moved on `/v1/connect` non-relay-auth first frame — 3 new integration tests, suite 44/44)
 
 ---
 
@@ -309,7 +310,10 @@ Key constraints discovered (drive the architecture):
 
 | Handle | Type | Task ID | Orchestration IDs | Status | Created | Branch | Merged |
 |---|---|---|---|---|---|---|---|
-| `term_59b66903-3a00-404d-a628-c7d81cdd843a` | worker | REL-R16, REL-R22 | run_effeaea830f9 / task_9a1942ab8f58 / ctx_d33866e33259 | IN_PROGRESS | 2026-08-21 | `main` (Fabrica-relay/) | — |
+| `term_59b66903-3a00-404d-a628-c7d81cdd843a` | worker | REL-R16, REL-R22 | run_effeaea830f9 / task_9a1942ab8f58 / ctx_d33866e33259 | released (2026-08-23 — work verified, 5 prod bugs fixed+redeployed; task rows not yet promoted) | 2026-08-21 | `main` (Fabrica-relay/) | — |
+| R16R22-closeout | worker | REL-R16, REL-R22 | run_08477275642d / task_5ff46aec5527 / ctx_a163f68f51c5 | done + reviewed (44/44 verified) — released 2026-08-24 | 2026-08-24 | `main` (Fabrica-relay/) | — (direct on main) |
+| Wire-compat-audit → fixer | worker | audit; FIX 3 bugs (task_72932a86de18) | run_08477275642d / task_9ed6b3aac089, task_72932a86de18 / ctx_f56496de6b83, ctx_1766689ec7aa | done + reviewed (diffs verified, 44/44, tsc 0) — released 2026-08-24 | 2026-08-24 | `main` (Fabrica-relay/) | — (direct on main) |
+| Live-deploy-verify | worker | live deploy check (read-only) | run_08477275642d / task_63febdbc8f81 / ctx_c0f34444626f | done (results read from terminal after provider network errors; /health gap filled by orchestrator) — released 2026-08-24 | 2026-08-24 | `main` (Fabrica-relay/) | n/a (read-only) |
 
 **Rules:**
 - Only the main orchestrator creates sessions in this ledger
@@ -331,4 +335,4 @@ Key constraints discovered (drive the architecture):
 
 ---
 
-_Last updated: 2026-08-23_
+_Last updated: 2026-08-24_

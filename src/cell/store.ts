@@ -184,8 +184,10 @@ export class CellStore {
   // --- pending connections ---
 
   getPendingConns(hostId: string): PendingConn[] {
+    // Explicit columns only — SELECT * would leak the internal host_id column
+    // into wire-facing PendingConn objects (client schema is .strict())
     return this.ctx.storage.sql
-      .exec("SELECT * FROM pending_conns WHERE host_id = ?", hostId)
+      .exec("SELECT connId, connTicket FROM pending_conns WHERE host_id = ?", hostId)
       .toArray() as unknown as PendingConn[];
   }
 

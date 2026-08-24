@@ -278,6 +278,12 @@ export class Cell extends DurableObject<CellEnv> {
       } else if (path.startsWith("/v1/connect/")) {
         const relayHostId = decodeURIComponent(path.slice("/v1/connect/".length));
         this.ctx.acceptWebSocket(server, ["phone", `host:${relayHostId}`]);
+        // Remember the public origin so a relay-moved reply can name it
+        try {
+          server.serializeAttachment({ relayHostId, origin: url.origin });
+        } catch {
+          /* attachment optional — relay-moved just skipped if unset */
+        }
       } else {
         return new Response("Not Found", { status: 404 });
       }
@@ -340,9 +346,13 @@ export class Cell extends DurableObject<CellEnv> {
     if (!body.resumeToken || !runtime) {
       return Response.json({ ok: false });
     }
+    // cellUrl must be the public worker origin — the internal RPC URL
+    // (http://do) is not dialable by clients
+    const publicOrigin =
+      request.headers.get("X-Fabrica-Public-Origin") ?? new URL(request.url).origin;
     return Response.json({
       ok: true,
-      cellUrl: new URL(request.url).origin,
+      cellUrl: publicOrigin,
       assignmentEpoch: runtime.stored.assignmentEpoch,
       leaseExpiresAt: runtime.stored.leaseExpiresAt,
     });
@@ -879,11 +889,13 @@ export class Cell extends DurableObject<CellEnv> {
       return;
     }
 
-    // First message must be relay-auth
+    // First message decides the leg: relay-auth => cell invite flow;
+    // anything else is an invite-recovery probe (director leg) and gets
+    // relay-moved with the current assignment
     const phoneConn = this.phoneConnForSocket(ws);
     if (!phoneConn) {
       if (msg.type !== "relay-auth") {
-        ws.close(CloseCode.BAD_OUTER_CREDENTIAL, "expected relay-auth");
+        this.sendRelayMoved(ws);
         return;
       }
       this.handlePhoneAuth(ws, msg);
@@ -892,6 +904,38 @@ export class Cell extends DurableObject<CellEnv> {
 
     // Subsequent messages — forward to host data socket (JSON or text)
     this.forwardPhoneToHost(ws, raw);
+  }
+
+  // Invite-recovery (director leg): reply {type:'relay-moved', v:1, cellUrl,
+  // assignmentEpoch} per the client contract (RelayMovedSchema — cellUrl must
+  // be a canonical https origin; the client requires a strictly-newer epoch)
+  private sendRelayMoved(ws: WebSocket): void {
+    const relayHostId = this.resolveHostId(ws);
+    const runtime = relayHostId ? this.hosts.get(relayHostId) : undefined;
+    let origin = "";
+    try {
+      const att = ws.deserializeAttachment() as { origin?: string } | undefined;
+      origin = att?.origin ?? "";
+    } catch {
+      /* no attachment set */
+    }
+    if (!origin) {
+      ws.close(CloseCode.BAD_OUTER_CREDENTIAL, "unknown origin");
+      return;
+    }
+    try {
+      ws.send(
+        JSON.stringify({
+          type: "relay-moved",
+          v: 1 as const,
+          cellUrl: origin,
+          assignmentEpoch: runtime?.stored.assignmentEpoch ?? Date.now(),
+        }),
+      );
+      ws.close(1000, "");
+    } catch {
+      /* already closed */
+    }
   }
 
   private phoneConnForSocket(ws: WebSocket): PhoneConn | undefined {

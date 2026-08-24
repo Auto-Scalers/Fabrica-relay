@@ -70,11 +70,16 @@ class MockSql {
       return emptyResult();
     }
 
-    const select = s.match(/^SELECT \* FROM (\w+)(?:\s+WHERE (\w+) = \?)?$/i);
+    const select = s.match(/^SELECT (.+?) FROM (\w+)(?:\s+WHERE (\w+) = \?)?$/i);
     if (select) {
-      const t = this.tables.get(select[1]) ?? { columns: [], pk: [], rows: [] };
+      const t = this.tables.get(select[2]) ?? { columns: [], pk: [], rows: [] };
       let rows = t.rows;
-      if (select[2]) rows = rows.filter((r) => r[select[2]] === params[0]);
+      if (select[3]) rows = rows.filter((r) => r[select[3]] === params[0]);
+      const cols = select[1].trim();
+      if (cols !== "*") {
+        const names = cols.split(",").map((c) => c.trim());
+        rows = rows.map((r) => Object.fromEntries(names.map((n) => [n, r[n]])));
+      }
       return result(rows);
     }
 

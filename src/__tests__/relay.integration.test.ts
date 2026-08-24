@@ -336,6 +336,34 @@ describe("Cell control channel (integration)", () => {
   });
 });
 
+describe("Ping/pong keepalive (integration)", () => {
+  it("sends {type:'ping', t} every 15s and keeps the control channel alive after pong", async () => {
+    const session = await hostHandshake("keepalive-host");
+
+    // Server-driven app-level JSON ping (protocol pings do NOT satisfy the client watchdog)
+    const raw = await session.ctrl.nextRaw(20000);
+    expect(typeof raw).toBe("string");
+    const ping = JSON.parse(raw as string) as Record<string, unknown>;
+    expect(Object.keys(ping).sort()).toEqual(["t", "type"]); // strict schema: no extra fields
+    expect(ping.type).toBe("ping");
+    expect(typeof ping.t).toBe("number");
+    expect(Number(ping.t)).toBeLessThanOrEqual(Date.now());
+
+    // Client reply {type:'pong', t} must be accepted without a 4401 close
+    session.ctrl.send(JSON.stringify({ type: "pong", t: ping.t }));
+
+    // Channel still functional after pong: run a reqId RPC roundtrip
+    session.ctrl.send(
+      JSON.stringify({ type: "invite-create", reqId: "req-keepalive-1", relayDeviceId: "dev-ka" }),
+    );
+    const resp = await session.ctrl.nextJson();
+    expect(resp.type).toBe("invite-created");
+    expect(resp.reqId).toBe("req-keepalive-1");
+
+    await session.ctrl.close();
+  }, 30000);
+});
+
 // ---------------------------------------------------------------- Device management
 
 describe("Device management RPCs over control channel (integration)", () => {
@@ -562,9 +590,136 @@ describe("Data tunneling (integration)", () => {
     await phone.close();
     await session.ctrl.close();
   });
+
+  it("closes the data socket with 4404 HOST_OFFLINE for a connection with no host", async () => {
+    // Data sockets may be opened for any connId; one the server never issued
+    // has no host mapping → 4404 HOST_OFFLINE on attach
+    const data = await connectWs("/v1/host/data/never-issued-conn-id");
+    data.send(
+      JSON.stringify({
+        type: "host-data-auth",
+        v: 1,
+        connTicket: "t".repeat(43),
+        generation: 1,
+      }),
+    );
+    expect(await data.nextClose()).toBe(4404);
+  });
+
+  it("closes the phone socket with 4408 PEER_DROPPED when the host data channel drops", async () => {
+    const relayHostId = "tunnel-peer-drop-host";
+    const session = await hostHandshake(relayHostId);
+    const phone = await connectPhone(relayHostId, "invite-token-peer-drop");
+
+    const connOpen = await session.ctrl.nextJson();
+    expect(connOpen.type).toBe("conn-open");
+
+    const data = await connectWs(`/v1/host/data/${connOpen.connId}`);
+    data.send(
+      JSON.stringify({
+        type: "host-data-auth",
+        v: 1,
+        connTicket: connOpen.connTicket,
+        generation: Number(session.ack.generation),
+      }),
+    );
+
+    // Host drops the data channel — messages and close are delivered in
+    // order, so auth is processed before the close event reaches the DO
+    await data.close();
+
+    expect(await phone.nextClose()).toBe(4408);
+
+    await session.ctrl.close();
+  });
+
+  it("rejects the 9th pending connection with relay-hello ok:false + 4429 LIMIT_EXCEEDED", async () => {
+    const relayHostId = "limit-exceeded-host";
+    const session = await hostHandshake(relayHostId);
+
+    // Fill all 8 pending slots (sockets stay open, never attach data)
+    const phones: TestSocket[] = [];
+    for (let i = 0; i < 8; i++) {
+      phones.push(await connectPhone(relayHostId, `invite-limit-${i}`));
+      const connOpen = await session.ctrl.nextJson();
+      expect(connOpen.type).toBe("conn-open");
+    }
+
+    // The 9th is over the limit: relay-hello {ok:false, code:4429} then close 4429
+    const ninth = await connectWs(`/v1/connect/${encodeURIComponent(relayHostId)}`);
+    ninth.send(
+      JSON.stringify({ type: "relay-auth", v: 1, mode: "connect", credential: "invite-limit-overflow" }),
+    );
+    const hello = await ninth.nextJson();
+    expect(hello.type).toBe("relay-hello");
+    expect(hello.ok).toBe(false);
+    expect(Number(hello.code)).toBe(4429);
+    expect(await ninth.nextClose()).toBe(4429);
+
+    for (const p of phones) await p.close();
+    await session.ctrl.close();
+  });
 });
 
 // ---------------------------------------------------------------- Resolve
+
+describe("Phone invite-recovery relay-moved (integration)", () => {
+  it("replies relay-moved to a /v1/connect dial whose first frame is not relay-auth", async () => {
+    const relayHostId = "relay-moved-host";
+    const session = await hostHandshake(relayHostId);
+
+    const probe = await connectWs(`/v1/connect/${encodeURIComponent(relayHostId)}`);
+    probe.send(JSON.stringify({ type: "status.probe" }));
+    const moved = await probe.nextJson();
+    expect(moved.type).toBe("relay-moved");
+    expect(moved.v).toBe(1);
+    // Strict client schema (RelayMovedSchema): exactly these fields, canonical
+    // https origin, positive epoch
+    expect(Object.keys(moved).sort()).toEqual(["assignmentEpoch", "cellUrl", "type", "v"]);
+    expect(moved.cellUrl).toBe(ORIGIN);
+    expect(Number(moved.assignmentEpoch)).toBeGreaterThan(0);
+
+    await probe.close();
+    await session.ctrl.close();
+  });
+
+  it("still serves the cell invite flow (relay-hello) for a relay-auth first frame", async () => {
+    const relayHostId = "relay-moved-vs-hello-host";
+    const session = await hostHandshake(relayHostId);
+    const phone = await connectPhone(relayHostId, "invite-token-moved-probe");
+    const connOpen = await session.ctrl.nextJson();
+    expect(connOpen.type).toBe("conn-open");
+    await phone.close();
+    await session.ctrl.close();
+  });
+});
+
+describe("host-hello-ack pendingConns wire shape (integration)", () => {
+  it("serves persisted pendingConns with exact {connId, connTicket} keys (no column leakage)", async () => {
+    const relayHostId = "pending-conn-leak-host";
+    const s1 = await hostHandshake(relayHostId);
+
+    // Create a pending connection that is persisted but never attached
+    const phone = await connectPhone(relayHostId, "invite-token-leak-probe");
+    const connOpen = await s1.ctrl.nextJson();
+    expect(connOpen.type).toBe("conn-open");
+
+    // Re-handshake: the DO re-reads pendingConns from SQLite for the ack
+    await s1.ctrl.close();
+    await phone.close();
+    const s2 = await hostHandshake(relayHostId);
+    const ack = s2.ack;
+    expect(Array.isArray(ack.pendingConns)).toBe(true);
+    expect((ack.pendingConns as unknown[]).length).toBeGreaterThanOrEqual(1);
+    for (const pc of ack.pendingConns as Record<string, unknown>[]) {
+      // Client PendingConnectionSchema is .strict() — extra storage columns
+      // (e.g. host_id) would make the whole host-hello-ack fail to parse
+      expect(Object.keys(pc).sort()).toEqual(["connId", "connTicket"]);
+    }
+
+    await s2.ctrl.close();
+  });
+});
 
 describe("Director POST /v1/resolve (integration)", () => {
   it("resolves a host with live state through the real Durable Object", async () => {
@@ -579,7 +734,9 @@ describe("Director POST /v1/resolve (integration)", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.v).toBe(1);
-    expect(typeof body.cellUrl).toBe("string");
+    // cellUrl must be the PUBLIC worker origin (canonical https), never the
+    // DO-internal RPC URL
+    expect(body.cellUrl).toBe(ORIGIN);
     expect(body.assignmentEpoch).toBeGreaterThan(0);
     expect(body.leaseExpiresAt).toBeGreaterThan(Date.now());
 

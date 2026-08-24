@@ -138,11 +138,17 @@ export function createDirectorApp(): Hono<{ Bindings: DirectorEnv }> {
     const stub = c.env.CELL.get(id);
 
     // Ask the DO to validate the resume token and get assignment info
+    // The DO only sees its internal RPC URL, so pass the public worker
+    // origin explicitly — cellUrl handed to phones must be dialable.
+    const publicOrigin = new URL(c.req.url).origin;
     let result: { ok: boolean; cellUrl?: string; assignmentEpoch?: number; leaseExpiresAt?: number };
     try {
       const resp = await stub.fetch("http://do/resolve-resume", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Fabrica-Public-Origin": publicOrigin,
+        },
         body: JSON.stringify({ resumeToken: body.resumeToken, relayHostId: body.relayHostId }),
       });
       result = await resp.json<{
