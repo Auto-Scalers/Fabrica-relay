@@ -2,6 +2,15 @@
 
 > Single source of truth for relay server work. Schema: `.Fabrica-board/Fabrica-Schema.md`. The Roadmap (`.Fabrica-Board/Fabrica-Roadmap.md`) tracks cross-cutting status only — this file owns execution details.
 
+## High-Level Goals
+
+> WHAT THIS PROJECT IS FOR — read this before any task:
+
+1. **Phone↔desktop works everywhere.** A reliable E2EE WebSocket bridge so the mobile companion controls the desktop app even off-LAN.
+2. **Wire-compatible, always.** Any change matches the client schemas in `Fabrica-app/src/main/runtime/relay/relay-control-protocol.ts` — the client is the spec.
+3. **$0 and secure.** Cloudflare Workers + Durable Objects free tier; challenge-response auth; no secrets in code.
+4. **Beta-launch ready.** Live deployment verified end-to-end with a real pairing — gate for Roadmap Phase B (close REL-R16/R22 integration tests).
+
 ## Rollup
 
 | Metric | Value |

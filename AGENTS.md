@@ -23,6 +23,17 @@ This is the **Fabrica relay server** — a standalone WebSocket bridge that enab
 - D1/SQLite per object (prod); local SQLite (dev)
 - Vitest (testing)
 
+## Commands
+
+Run these before claiming DONE (from `Fabrica-relay/`):
+
+```bash
+pnpm install       # dependencies
+pnpm test          # vitest unit + miniflare integration tests
+npx tsc --noEmit   # TypeScript check
+npx wrangler dev   # local dev with Durable Objects
+```
+
 ## Architecture
 
 ```
@@ -51,6 +62,15 @@ Director (HTTP Worker)              Cell (Durable Object)
 - **All timestamps are epoch milliseconds**
 - **All WebSocket messages are JSON** (no binary on control channel); data channels forward raw frames (binary or text)
 - **Max payload: 64KB** per WebSocket message (control channel); data channel cap = 1 MiB (Workers max)
+
+## Definition of Done
+
+A task is DONE only when ALL of these hold:
+
+1. **Commands pass:** `pnpm test` and `npx tsc --noEmit` clean — paste real output as evidence.
+2. **Wire compatibility:** any protocol change matches the client schemas in `Fabrica-app/src/main/runtime/relay/relay-control-protocol.ts` (`.strict()` schemas — the client is the spec).
+3. **Security intact:** challenge-response, close codes, and E2EE behavior unchanged unless the task explicitly says so.
+4. **Tracking files updated in the same edit:** task status + Rollup recount in `.Fabrica-relay-board/Fabrica-relay-tasks.md`, Checkpoint table, Session Ledger row.
 
 ## What You Do NOT Do
 
@@ -120,7 +140,15 @@ Key constraints:
 
 ## Task File
 
-Your task file is `.Fabrica-relay-board/Fabrica-relay-tasks.md` — the single source of truth for all relay work.
+Your task file is `.Fabrica-relay-board/Fabrica-relay-tasks.md` — the single source of truth for all relay work. Schema for all tracking edits: `.Fabrica-board/Fabrica-Schema.md` (Tracking Schema v1 — status enum, Rollup, Checkpoint, Session Ledger).
+
+## Resume Protocol
+
+On heartbeat kick or session resume:
+
+1. Read your task file's **Checkpoint (Current State)** table FIRST.
+2. Continue from the **Next Action** cell — never restart completed work; check Status + Notes before dispatching.
+3. Any status change updates the Rollup in the same edit.
 
 ## How to Send Results
 
