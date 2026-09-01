@@ -147,10 +147,34 @@ function connIdFromTags(tags: string[]): string | undefined {
 
 // ------------------------------------------------------------ transcript builder
 
-// The transcript is a binary-encoded struct with these fields (length-prefixed UTF-8 strings, 8-byte big-endian numbers):
-// protocol, version, relayOrigin, relayEphemeralPublicKey, challengeNonce, challengeId,
-// userId, profileId, organizationId, relayHostId, hostPublicKey, assignmentEpoch,
-// previousGeneration, resumeRequested, issuedAt, expiresAt
+// The transcript is a binary-encoded name-value struct matching the desktop
+// client's parseTranscript (relay-host-proof.ts). Each field is:
+//   4-byte BE length + name UTF-8 + 4-byte BE length + value bytes
+// Numeric values are 8-byte BE. Version is a raw byte. resumeRequested is a
+// single byte. 16 fields total.
+
+function be32(n: number): Uint8Array {
+  const buf = new Uint8Array(4);
+  new DataView(buf.buffer).setUint32(0, n, false);
+  return buf;
+}
+
+function be64(n: bigint): Uint8Array {
+  const buf = new Uint8Array(8);
+  new DataView(buf.buffer).setBigUint64(0, n, false);
+  return buf;
+}
+
+function nameValue(name: string, value: Uint8Array): Uint8Array {
+  const nameBytes = new TextEncoder().encode(name);
+  const result = new Uint8Array(4 + nameBytes.length + 4 + value.length);
+  const view = new DataView(result.buffer);
+  view.setUint32(0, nameBytes.length, false);
+  result.set(nameBytes, 4);
+  view.setUint32(4 + nameBytes.length, value.length, false);
+  result.set(value, 4 + nameBytes.length + 4);
+  return result;
+}
 
 function buildTranscript(fields: {
   protocol: string;
@@ -170,59 +194,32 @@ function buildTranscript(fields: {
   issuedAt: number;
   expiresAt: number;
 }): Uint8Array {
-  const parts: Uint8Array[] = [];
   const encoder = new TextEncoder();
 
-  // String fields: 4-byte LE length + UTF-8 bytes
-  const stringFields = [
-    fields.protocol,
-    String(fields.version),
-    fields.relayOrigin,
-    fields.challengeId,
-    fields.userId,
-    fields.profileId,
-    fields.organizationId,
-    fields.relayHostId,
+  // 16 name-value pairs matching the client's parseTranscript order
+  const pairs: Uint8Array[] = [
+    nameValue("protocol", encoder.encode(fields.protocol)),
+    nameValue("version", new Uint8Array([fields.version])),
+    nameValue("relayOrigin", encoder.encode(fields.relayOrigin)),
+    nameValue("relayEphemeralPublicKey", fields.relayEphemeralPublicKey),
+    nameValue("challengeNonce", fields.challengeNonce),
+    nameValue("challengeId", encoder.encode(fields.challengeId)),
+    nameValue("userId", encoder.encode(fields.userId)),
+    nameValue("profileId", encoder.encode(fields.profileId)),
+    nameValue("organizationId", encoder.encode(fields.organizationId)),
+    nameValue("relayHostId", encoder.encode(fields.relayHostId)),
+    nameValue("hostPublicKey", fields.hostPublicKey),
+    nameValue("assignmentEpoch", be64(BigInt(fields.assignmentEpoch))),
+    nameValue("previousGeneration", be64(BigInt(fields.previousGeneration))),
+    nameValue("resumeRequested", new Uint8Array([fields.resumeRequested ? 1 : 0])),
+    nameValue("issuedAt", be64(BigInt(fields.issuedAt))),
+    nameValue("expiresAt", be64(BigInt(fields.expiresAt))),
   ];
-  for (const s of stringFields) {
-    const encoded = encoder.encode(s);
-    const len = new Uint8Array(4);
-    new DataView(len.buffer).setUint32(0, encoded.length, true);
-    parts.push(len);
-    parts.push(encoded);
-  }
 
-  // Binary fields: 4-byte LE length + raw bytes
-  const binaryFields = [
-    fields.relayEphemeralPublicKey,
-    fields.challengeNonce,
-    fields.hostPublicKey,
-  ];
-  for (const b of binaryFields) {
-    const len = new Uint8Array(4);
-    new DataView(len.buffer).setUint32(0, b.length, true);
-    parts.push(len);
-    parts.push(b);
-  }
-
-  // Numeric fields: 8-byte LE
-  const numFields = [
-    BigInt(fields.assignmentEpoch),
-    BigInt(fields.previousGeneration),
-    BigInt(fields.resumeRequested ? 1 : 0),
-    BigInt(fields.issuedAt),
-    BigInt(fields.expiresAt),
-  ];
-  for (const n of numFields) {
-    const buf = new Uint8Array(8);
-    new DataView(buf.buffer).setBigUint64(0, n, true);
-    parts.push(buf);
-  }
-
-  const totalLen = parts.reduce((sum, p) => sum + p.length, 0);
+  const totalLen = pairs.reduce((sum, p) => sum + p.length, 0);
   const result = new Uint8Array(totalLen);
   let offset = 0;
-  for (const p of parts) {
+  for (const p of pairs) {
     result.set(p, offset);
     offset += p.length;
   }
@@ -520,16 +517,20 @@ export class Cell extends DurableObject<CellEnv> {
       expiresAt,
     });
 
-    // Plaintext = domain\0 + transcript + secret
+    // Plaintext = domain\0 + uint32BE(transcriptLength) + transcript + secret
     const domainBytes = encodeString(HOST_CHALLENGE_PLAINTEXT_DOMAIN);
     const domainZero = new Uint8Array(domainBytes.length + 1);
     domainZero.set(domainBytes);
     // domainZero[domainBytes.length] = 0; // already 0
 
-    const plaintext = new Uint8Array(domainZero.length + transcript.length + secret.length);
+    const transcriptLenBe = be32(transcript.length);
+    const plaintext = new Uint8Array(
+      domainZero.length + 4 + transcript.length + secret.length,
+    );
     plaintext.set(domainZero, 0);
-    plaintext.set(transcript, domainZero.length);
-    plaintext.set(secret, domainZero.length + transcript.length);
+    plaintext.set(transcriptLenBe, domainZero.length);
+    plaintext.set(transcript, domainZero.length + 4);
+    plaintext.set(secret, domainZero.length + 4 + transcript.length);
 
     // Encrypt with NaCl box
     const ciphertext = nacl.box(

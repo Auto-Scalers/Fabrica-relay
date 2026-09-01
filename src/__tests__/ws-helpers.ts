@@ -155,7 +155,7 @@ export async function hostHandshake(
   const challenge = await ctrl.nextJson();
   expect(challenge.type).toBe("host-challenge");
 
-  // Decrypt: plaintext = domain\0 + transcript + secret(32)
+  // Decrypt: plaintext = domain\0 + uint32BE(transcriptLength) + transcript + secret(32)
   const plaintext = nacl.box.open(
     b64ToBytes(challenge.ciphertextB64 as string),
     base64UrlToBytes(challenge.nonceB64 as string),
@@ -165,8 +165,14 @@ export async function hostHandshake(
   expect(plaintext).not.toBeNull();
 
   const domainLen = new TextEncoder().encode(HOST_CHALLENGE_PLAINTEXT_DOMAIN).length + 1;
-  const secret = plaintext!.slice(plaintext!.length - 32);
-  const transcript = plaintext!.slice(domainLen, plaintext!.length - 32);
+  const transcriptLen = new DataView(
+    plaintext!.buffer,
+    plaintext!.byteOffset + domainLen,
+    4,
+  ).getUint32(0, false);
+  const transcriptStart = domainLen + 4;
+  const secret = plaintext!.slice(transcriptStart + transcriptLen);
+  const transcript = plaintext!.slice(transcriptStart, transcriptStart + transcriptLen);
 
   const prefix = new TextEncoder().encode(`${HOST_PROOF_TRANSCRIPT_DOMAIN}\0ack\0`);
   const proof = await hmacSha256Bytes(secret, concat(prefix, transcript));
