@@ -1,4 +1,4 @@
-name = "fabrica-relay"
+name = "fabrica"
 main = "src/index.ts"
 account_id = "29426cba5c56f3a08df28fb89e48bb23"
 compatibility_date = "2024-12-01"
@@ -16,6 +16,6 @@ new_sqlite_classes = ["Cell"]
 [vars]
 # Set via `wrangler secret put FABRICA_RELAY_JWT_SECRET`
 # DIRECTOR_URL is the production URL (free workers.dev subdomain)
-DIRECTOR_URL = "https://fabrica-relay.fabrica-relay.workers.dev"
+DIRECTOR_URL = "https://fabrica.autoscalers.workers.dev"
 # Host lease duration in ms — also used as drain graceMs. Clamped to [5000, 3600000]
 FABRICA_RELAY_LEASE_MS = "3600000"

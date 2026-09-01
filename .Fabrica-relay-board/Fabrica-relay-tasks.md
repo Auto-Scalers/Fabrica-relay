@@ -76,7 +76,7 @@ npx tsc --noEmit   # TypeScript check
 
 ## Live Deployment
 
-- **URL**: `https://fabrica-relay.fabrica-relay.workers.dev`
+- **URL**: `https://fabrica.autoscalers.workers.dev`
 - **Stack**: Cloudflare Workers + Durable Objects (free tier, $0/month)
 - **Account**: `29426cba5c56f3a08df28fb89e48bb23`
 - **Auth**: `FABRICA_RELAY_JWT_SECRET` set to Supabase JWT secret
