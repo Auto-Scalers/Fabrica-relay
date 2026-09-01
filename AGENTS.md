@@ -20,7 +20,7 @@ This is the **Fabrica relay server** — a standalone WebSocket bridge that enab
 - Durable Objects + WebSocket Hibernation API
 - tweetnacl (NaCl box, pure-JS)
 - HMAC-SHA256 via Web Crypto (`crypto.subtle`) — Workers has no `node:crypto`
-- D1/SQLite per object (prod); local SQLite (dev)
+- SQLite via Durable Object storage (per-host persistence)
 - Vitest (testing)
 
 ## Commands

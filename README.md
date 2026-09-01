@@ -60,17 +60,15 @@ WebSocket server that bridges host and phone connections.
 # Install dependencies
 pnpm install
 
-# Run locally
+# Run locally (Cloudflare Workers + Durable Objects)
 pnpm dev
 
 # Run tests
 pnpm test
 
-# Build
-pnpm build
+# Type check
+pnpm typecheck
 ```
-
-Cloudflare runtime: `npx wrangler dev` for local development with Durable Objects.
 
 ## Deployment
 
@@ -85,10 +83,9 @@ wrangler deploy
 
 | Variable | Purpose | Required |
 |----------|---------|----------|
-| `FABRICA_RELAY_JWT_SECRET` | Secret for validating relay JWTs (HS256) | Yes |
+| `FABRICA_RELAY_JWT_SECRET` | HS256 secret for validating relay JWTs | Yes |
 | `DIRECTOR_URL` | Public director origin | Yes |
-| `CELL_DURABLE_OBJECT` binding | Configured in wrangler.toml | Yes (via binding) |
-| D1 database binding `DB` | Configured in wrangler.toml | Yes (via binding) |
+| `FABRICA_RELAY_LEASE_MS` | Lease duration in ms (default 3600000, clamped [5000, 3600000]) | No |
 
 ## License
 
